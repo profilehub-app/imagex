@@ -1135,7 +1135,8 @@ def extract_youtube_root_lexbor(source_url: str, html: str | LexborHTMLParser):
         if m_handle:
             handle = f"@{m_handle.group(1)}"
         elif name:
-            handle = f"@{re.sub(r'\\s+', '', name.lower())}"
+            clean_slug = re.sub(r"\s+", "", name.lower())
+            handle = f"@{clean_slug}"
 
     structured_bio = {}
     if handle:
