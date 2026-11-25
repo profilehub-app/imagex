@@ -1,6 +1,20 @@
 import { getDuplicateSourceKey } from '../../../utils/duplicateSource';
 
-export type TimelinePlatform = 'eporner' | 'youtube' | 'pornhub' | 'xhamster' | 'generic';
+import {
+  getDynamicSourceLabel,
+  getDynamicUrlHints,
+  getSourceCapabilities,
+  isDynamicCatalogCdnUrl,
+  resolveDynamicSourceFromUrl,
+} from './timelineSourceCapabilities';
+
+export type TimelinePlatform =
+  | 'youtube'
+  | 'x'
+  | 'pinterest'
+  | 'imgur'
+  | 'generic'
+  | (string & {});
 
 export interface TimelineVideoQuality {
   height: number;
@@ -28,11 +42,30 @@ export interface TimelineCreatorStats {
   posts?: number;
   albums?: number;
   gifs?: number;
+  shorts?: number;
   likes?: string;
   subscribers?: string;
   followers?: string;
   views?: string;
+  rating?: string;
   verified?: boolean;
+}
+
+export interface VideoPortalInfo {
+  country?: string;
+  languages?: string;
+  joinedAt?: string;
+  lastActive?: string;
+  profileHits?: string;
+  website?: string;
+  ratingPercent?: string;
+  ratingVotes?: number;
+  totalPublicVideos?: number;
+  totalPremiumVideos?: number;
+  totalShorts?: number;
+  hasShorts?: boolean;
+  ajaxBaseUrl?: string;
+  [key: string]: unknown;
 }
 
 export interface TimelinePlaylist {
@@ -45,17 +78,49 @@ export interface TimelinePlaylist {
   videos?: TimelinePost[];
 }
 
+export type TimelineEntityKind = 'creator' | 'channel' | 'tag' | 'category' | 'subforum' | 'thread';
+
+export interface TimelineEntityRef {
+  name: string;
+  url?: string;
+  kind?: TimelineEntityKind | 'artist';
+  count?: number;
+  thumbnailUrl?: string;
+  gender?: string;
+}
+
+export interface TimelineReleaseMirrorLink {
+  host?: string;
+  url: string;
+  label?: string;
+}
+
+export type TimelineThreadKind = 'inline_album' | 'video_release' | 'download_pack' | 'artist_collection' | (string & {});
+
 export interface TimelineCreator {
   id: string;
   name: string;
   handle: string;
   avatar: string;
+  banner?: string;
   site?: TimelinePlatform | string;
+  entityKind?: TimelineEntityKind;
   profileUrl: string;
   verified: boolean;
   stats: TimelineCreatorStats;
   bio?: string;
   playlists?: TimelinePlaylist[];
+  relatedEntities?: TimelineEntityRef[];
+  portalInfo?: VideoPortalInfo;
+  featuredPerformers?: TimelineEntityRef[];
+  affiliatedChannels?: TimelineEntityRef[];
+  interests?: TimelineEntityRef[];
+  supportsSort?: string[];
+  activeSort?: string;
+  profilePage?: number;
+  profileHasMore?: boolean;
+  profileNextPage?: number | null;
+  profileNextPageUrl?: string | null;
 }
 
 export interface TimelinePhotoItem {
@@ -69,7 +134,31 @@ export interface TimelinePhotoItem {
   fileSizeBytes?: number;
   format?: string;
   isResolvedOriginal?: boolean;
+  requiresProxy?: boolean;
   isAnimated?: boolean;
+}
+
+export interface TimelineReferencedPost {
+  text?: string;
+  creatorName?: string;
+  creatorHandle?: string;
+  originalUrl?: string;
+  photos?: string[];
+  thumbnailUrl?: string;
+}
+
+export interface TimelinePostRelation {
+  kind: 'quote' | 'repost' | 'reply';
+  post?: TimelineReferencedPost;
+}
+
+export interface TimelineSocialMetrics {
+  likes?: number | null;
+  replies?: number | null;
+  reposts?: number | null;
+  quotes?: number | null;
+  views?: number | null;
+  bookmarks?: number | null;
 }
 
 export interface TimelinePost {
@@ -79,12 +168,17 @@ export interface TimelinePost {
   creatorHandle: string;
   creatorAvatar: string;
   creatorVerified?: boolean;
-  type: 'video' | 'photo_grid' | 'album' | 'gif' | 'playlist';
+  type: 'video' | 'photo_grid' | 'album' | 'gif' | 'playlist' | 'text';
+  text?: string;
+  relation?: TimelinePostRelation;
+  metrics?: TimelineSocialMetrics;
   source?: string;
   sourcePage?: string;
   sourceAssociation?: 'profile_uploads' | 'profile_videos';
   streamResolverUrl?: string;
   youtubeId?: string;
+  isShort?: boolean;
+  description?: string;
   videoUrl?: string;
   originalUrl?: string;
   albumUrl?: string;
@@ -100,9 +194,26 @@ export interface TimelinePost {
   duration?: string;
   views?: string;
   resolution?: string;
+  rating?: string;
   photos?: string[];
   photoItems?: TimelinePhotoItem[];
   photoCount?: number;
+  tags?: string[];
+  tagEntities?: TimelineEntityRef[];
+  categories?: TimelineEntityRef[];
+  hosts?: string[];
+  artists?: TimelineEntityRef[];
+  channels?: TimelineEntityRef[];
+  releaseLinks?: TimelineReleaseMirrorLink[];
+  releaseSpecs?: string[];
+  threadKind?: TimelineThreadKind;
+  boardName?: string;
+  boardUrl?: string;
+  needsEnrichment?: boolean;
+  totalPages?: number;
+  replyCount?: number;
+  mediaType?: string;
+  previewHdUrl?: string;
   comments: TimelineComment[];
   likes: number | null;
   liked?: boolean;
@@ -144,14 +255,27 @@ export function isTimelineDataPayload(value: unknown): value is TimelineDataPayl
     && typeof q.label === 'string' && typeof q.streamUrl === 'string'
     && strings(q, ['format_id', 'ext'])
     && (q.bitrate === undefined || (typeof q.bitrate === 'number' && Number.isFinite(q.bitrate)));
+  const isRelation = (rel: unknown) => record(rel)
+    && (rel.kind === 'quote' || rel.kind === 'repost' || rel.kind === 'reply')
+    && (rel.post === undefined || (record(rel.post)
+      && strings(rel.post, ['text', 'creatorName', 'creatorHandle', 'originalUrl', 'thumbnailUrl'])
+      && (rel.post.photos === undefined || (Array.isArray(rel.post.photos) && rel.post.photos.every(url => typeof url === 'string')))));
+  const isMetric = (value: unknown) => value === undefined || value === null
+    || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
+  const isMetrics = (value: unknown) => record(value)
+    && ['likes', 'replies', 'reposts', 'quotes', 'views'].every(key => isMetric(value[key]));
+  const postTypes: ReadonlySet<string> = new Set(['video', 'photo_grid', 'album', 'gif', 'playlist', 'text']);
   const isPost = (item: unknown, depth = 0): boolean => depth < 4 && record(item)
     && requiredStrings(item, ['id', 'creatorId', 'creatorName', 'creatorHandle', 'creatorAvatar', 'title', 'type'])
+    && typeof item.type === 'string' && postTypes.has(item.type)
     && strings(item, [
-      'caption', 'source', 'sourcePage', 'streamResolverUrl', 'youtubeId',
+      'caption', 'text', 'source', 'sourcePage', 'streamResolverUrl', 'youtubeId',
       'videoUrl', 'originalUrl', 'albumUrl', 'playlistUrl', 'masterHlsUrl',
       'previewVideoUrl', 'thumbnail', 'duration', 'views', 'resolution',
       'date', 'dateObservedAt', 'publicationDateRaw',
     ])
+    && (item.relation === undefined || isRelation(item.relation))
+    && (item.metrics === undefined || isMetrics(item.metrics))
     && (item.publicationDatePrecision === undefined || item.publicationDatePrecision === 'day')
     && (item.qualities === undefined || (Array.isArray(item.qualities) && item.qualities.every(isQuality)))
     && (item.playlistVideos === undefined || (Array.isArray(item.playlistVideos) && item.playlistVideos.every(sub => isPost(sub, depth + 1))))
@@ -178,6 +302,11 @@ export interface TimelineLightboxState {
   title: string;
   albumUrl?: string;
   isLoadingAlbum?: boolean;
+  albumPage?: number;
+  albumTotalPages?: number;
+  albumHasMore?: boolean;
+  albumNextPageUrl?: string | null;
+  isLoadingMoreAlbumPages?: boolean;
 }
 
 export interface TimelineAutoplayState {
@@ -445,13 +574,13 @@ export function isAnimatedMediaUrl(url?: string): boolean {
 export function upgradePhotoUrlFast(url?: string): string {
   if (!url) return '';
   let upgraded = url.trim();
-  // Eporner gallery thumb suffix: _296x1000.jpg or _880x660.jpg -> .jpg
-  if (/static-[^/]+-cdn\.eporner\.com\/gallery\//i.test(upgraded)) {
+  // Generic CDN gallery thumbnail dimension suffix: _296x1000.jpg or _880x660.jpg -> .jpg
+  if (/static-[^/]+-cdn\.[^/]+\/gallery\//i.test(upgraded)) {
     upgraded = upgraded.replace(/_\d+x\d+\.(jpe?g|png|webp|gif)(\?.*)?$/i, '.$1$2');
   }
-  // PornPics 460 thumbnail -> 1280 high-res original
-  if (/cdni\.pornpics\.com\/460\//i.test(upgraded)) {
-    upgraded = upgraded.replace(/\/460\//i, '/1280/');
+  // Visual gallery catalog 300px/460px thumbnails -> 1280px originals
+  if (/\/(?:300|460)\//i.test(upgraded) && (isDynamicCatalogCdnUrl(upgraded) || /^https?:\/\/cdni\.[^/]+\/(?:300|460)\//i.test(upgraded))) {
+    upgraded = upgraded.replace(/\/(?:300|460)\//i, '/1280/');
   }
   return upgraded;
 }
@@ -543,6 +672,7 @@ export function extractPlaylistsFromScan(
             duration: v.duration || undefined,
             views: v.views || v.subtitle || undefined,
             resolution: v.resolution || undefined,
+            rating: v.rating || undefined,
             comments: [],
             likes: typeof v.likes === 'number' ? v.likes : null,
             date: v.timeAgo || v.uploadedAt || '',
@@ -564,9 +694,23 @@ export function extractPlaylistsFromScan(
   return result;
 }
 
+/** Stable source identity used by discovery and explicit offline imports. */
+export function timelinePostSourceKey(url: string): string {
+  let comparable = url.trim();
+  try {
+    const parts = new URL(comparable);
+    if (/^(?:www\.|mobile\.)?(?:x\.com|twitter\.com)$/i.test(parts.hostname) && /^\/[^/]+\/status\/\d+(?:\/|$)/.test(parts.pathname)) {
+      const id = parts.pathname.match(/\/status\/(\d+)/)?.[1];
+      if (id) comparable = `https://x.com/i/status/${id}`;
+    }
+  } catch { /* keep the existing comparison for malformed or local strings */ }
+  return getDuplicateSourceKey(comparable) || '';
+}
+
 export function mapScanResponseToTimelinePosts(
   creator: TimelineCreator,
   scan: {
+    canonical_posts?: unknown[];
     canonical_videos?: Array<any>;
     canonical_albums?: Array<any>;
     canonical_gifs?: Array<any>;
@@ -584,7 +728,7 @@ export function mapScanResponseToTimelinePosts(
   const seenUrls = new Set<string>();
   const retained = new Set<TimelinePost>();
   const existingByUrl = new Map<string, TimelinePost>();
-  const sourceKey = (url: string) => getDuplicateSourceKey(url.trim()) || '';
+  const sourceKey = timelinePostSourceKey;
   const hintedIds = new Map<string,string>();
   for (const hint of identityHints.filter(hint => hint.creatorId === creator.id)) {
     for (const url of [hint.originalUrl,hint.albumUrl]) {
@@ -645,16 +789,70 @@ export function mapScanResponseToTimelinePosts(
 
   const platform = (creator.site || 'generic') as string;
 
-  // 1. Map canonical_videos
-  for (const v of scan.canonical_videos || []) {
+  // Optional frontend contract: adapters may supply normalized social posts.
+  // Without it, existing media catalogs are unchanged; nothing is fabricated.
+  const socialTypes = new Set<TimelinePost['type']>(['text', 'photo_grid', 'video', 'gif']);
+  if (Array.isArray(scan.canonical_posts)) {
+    for (const candidate of scan.canonical_posts) {
+      const payload = { creators: [], posts: [candidate] };
+      if (!isTimelineDataPayload(payload)) continue;
+      const post = payload.posts[0];
+      if (!socialTypes.has(post.type) || !post.id.trim() || !post.originalUrl) continue;
+      try {
+        const url = new URL(post.originalUrl);
+        if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) continue;
+      } catch { continue; }
+      const key = sourceKey(post.originalUrl);
+      if (!key || seenUrls.has(key)) continue;
+      seenUrls.add(key);
+      const existing = existingByUrl.get(key);
+      if (existing) retained.add(existing);
+      const legacyLikeCount = typeof post.likes === 'number' && Number.isSafeInteger(post.likes) && post.likes >= 0 ? post.likes : null;
+      const sourceLikeCount = post.metrics?.likes !== undefined ? post.metrics.likes : legacyLikeCount;
+      result.push({
+        ...existing,
+        ...post,
+        // Preserve local flags across refresh. The wrapper identity and nested
+        // referenced author are separate, and may legitimately be different.
+        id: existing?.id || hintedId(post.originalUrl) || `disc-social-${creator.id}-${encodeURIComponent(key)}`,
+        creatorId: creator.id,
+        creatorName: post.creatorName || creator.name,
+        creatorHandle: post.creatorHandle || resolvedHandle,
+        creatorAvatar: post.creatorAvatar || creator.avatar,
+        source: resolveTimelinePlatform(post.originalUrl, post.source) || post.source || platform,
+        date: post.date || existing?.date || '',
+        dateObservedAt: post.dateObservedAt || existing?.dateObservedAt,
+        comments: Array.isArray(post.comments) ? post.comments : existing?.comments || [],
+        likes: sourceLikeCount,
+        liked: existing?.liked,
+        favorited: existing?.favorited,
+        saved: existing?.saved,
+      });
+    }
+  }
+
+  // 1. Map canonical_videos + canonical_shorts
+  const rawScanVideos: Array<{ item: any; forceShort: boolean }> = [
+    ...((scan.canonical_videos || []).map((item) => ({ item, forceShort: false }))),
+    ...((((scan as unknown as Record<string, any>).canonical_shorts as any[]) || []).map((item) => ({ item, forceShort: true }))),
+  ];
+  for (const { item: v, forceShort } of rawScanVideos) {
     const origUrl = (v.originalUrl || v.pageUrl || v.url || '').trim();
     if (!claimSource(origUrl, v.timeAgo || v.uploadedAt || '', v.publicationDateRaw, v.publicationDatePrecision)) continue;
 
     let ytId: string | undefined;
-    if (origUrl.includes('youtube.com/watch') || origUrl.includes('youtu.be/')) {
-      const m = origUrl.match(/[?&]v=([A-Za-z0-9_-]{11})/) || origUrl.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
+    if (origUrl.includes('youtube.com/watch') || origUrl.includes('youtu.be/') || origUrl.includes('youtube.com/shorts/')) {
+      const m =
+        origUrl.match(/[?&]v=([A-Za-z0-9_-]{11})/) ||
+        origUrl.match(/youtu\.be\/([A-Za-z0-9_-]{11})/) ||
+        origUrl.match(/youtube\.com\/shorts\/([A-Za-z0-9_-]{8,16})/);
       if (m) ytId = m[1];
     }
+    const isShort =
+      forceShort
+      || Boolean((v as Record<string, unknown>).isShort)
+      || /\/shorts\//i.test(origUrl)
+      || String(v.duration || '').trim().toLowerCase() === 'shorts';
 
     const streamUrl = buildTimelineStreamUrl(v.streamUrl || origUrl, origUrl, undefined, ytId);
     result.push({
@@ -667,6 +865,7 @@ export function mapScanResponseToTimelinePosts(
       type: 'video',
       source: platform,
       youtubeId: ytId,
+      isShort: isShort || undefined,
       videoUrl: streamUrl,
       originalUrl: origUrl || undefined,
       previewVideoUrl: v.previewVideoUrl || v.previewClip || undefined,
@@ -675,6 +874,7 @@ export function mapScanResponseToTimelinePosts(
       duration: v.duration || undefined,
       views: v.views || v.subtitle || undefined,
       resolution: v.resolution || undefined,
+      rating: v.rating || undefined,
       comments: [],
       likes: typeof v.likes === 'number' ? v.likes : null,
       liked: false,
@@ -699,6 +899,13 @@ export function mapScanResponseToTimelinePosts(
     const cover = a.thumbnailUrl || a.cover_url || '';
     const count = typeof a.photoCount === 'number' && a.photoCount >= 0 ? a.photoCount : typeof a.reportedCount === 'number' && a.reportedCount >= 0 ? a.reportedCount : undefined;
 
+    const rawAlbumPhotos = Array.isArray(a.photos) && a.photos.length > 0
+      ? a.photos
+      : Array.isArray(a.previewImages) && a.previewImages.length > 0
+        ? a.previewImages
+        : [];
+    const albumPhotos = rawAlbumPhotos.filter((p: unknown): p is string => typeof p === 'string' && Boolean(p));
+
     result.push({
       id: hintedId(albUrl,aliases) || `disc-alb-${creator.id}-${a.id || encodeURIComponent(albUrl)}`,
       creatorId: creator.id,
@@ -706,16 +913,21 @@ export function mapScanResponseToTimelinePosts(
       creatorHandle: resolvedHandle,
       creatorAvatar: creator.avatar,
       creatorVerified: creator.verified,
-      type: 'photo_grid',
+      type: a.mediaType === 'video_release' || a.threadKind === 'video_release' ? 'video' : 'photo_grid',
+      mediaType: typeof a.mediaType === 'string' ? a.mediaType : undefined,
+      threadKind: typeof a.threadKind === 'string' ? (a.threadKind as TimelineThreadKind) : undefined,
+      releaseSpecs: Array.isArray(a.releaseSpecs) ? a.releaseSpecs.filter((s: unknown): s is string => typeof s === 'string') : undefined,
+      releaseLinks: normalizeReleaseLinks(a.releaseLinks),
       source: platform,
       sourcePage: a.sourcePage,
       sourceAssociation: a.sourceAssociation === 'profile_uploads' || a.sourceAssociation === 'profile_videos' ? a.sourceAssociation : undefined,
       originalUrl: albUrl || undefined,
       albumUrl: albUrl || undefined,
       thumbnail: cover,
-      photos: cover ? [cover] : [],
+      photos: albumPhotos.length > 0 ? albumPhotos : (cover ? [cover] : []),
       photoCount: count,
       title: a.title || creator.name,
+      description: typeof a.description === 'string' && a.description.trim() ? a.description.trim() : undefined,
       views: a.views || undefined,
       comments: [],
       likes: typeof a.likes === 'number' ? a.likes : null,
@@ -782,8 +994,31 @@ export function mapScanResponseToTimelinePosts(
   return [...result, ...creatorExisting.filter(post => !retained.has(post))];
 }
 
+const publicationTimeCache = new WeakMap<TimelinePost, number | null>();
+const tieBreakTimeCache = new WeakMap<TimelinePost, number | null>();
+const postPlatformCache = new WeakMap<TimelinePost, TimelinePlatform | undefined>();
+
+export function resolveCachedPostPlatform(post: TimelinePost, creatorSite?: TimelinePlatform): TimelinePlatform {
+  if (postPlatformCache.has(post)) {
+    const cached = postPlatformCache.get(post);
+    if (cached && cached !== 'generic') return cached;
+  }
+  const site = resolveTimelinePlatform(post.originalUrl || post.sourcePage || post.videoUrl, post.source);
+  postPlatformCache.set(post, site);
+  return site && site !== 'generic' ? site : creatorSite || 'generic';
+}
+
 /** An ordering estimate from source labels; never exposed as an exact upload date. */
 export function timelinePublicationTime(post: TimelinePost): number | null {
+  if (publicationTimeCache.has(post)) {
+    return publicationTimeCache.get(post) ?? null;
+  }
+  const computed = computeTimelinePublicationTime(post);
+  publicationTimeCache.set(post, computed);
+  return computed;
+}
+
+function computeTimelinePublicationTime(post: TimelinePost): number | null {
   const DAYS_PER_WEEK = 7; // Calendar unit conversion, not a recency window.
   const raw = post.date?.trim();
   if (!raw) return null;
@@ -824,26 +1059,35 @@ export const TIMELINE_BACKGROUND_POLL_MS = 5 * 60 * 1000;
 
 /** Internal chronological tie-breaker from verified raw timestamps; never exposed as a clock label. */
 export function publicationTieBreakTime(post: TimelinePost): number | null {
+  if (tieBreakTimeCache.has(post)) {
+    return tieBreakTimeCache.get(post) ?? null;
+  }
   const raw = post.publicationDateRaw?.trim();
-  if (!raw) return null;
+  if (!raw) {
+    tieBreakTimeCache.set(post, null);
+    return null;
+  }
   const full = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/);
-  if (!full) return null;
+  if (!full) {
+    tieBreakTimeCache.set(post, null);
+    return null;
+  }
   const normalized = /[TZ+-]\d*$/.test(raw) && raw.includes('T')
     ? raw.replace(' ', 'T')
     : `${full[1]}T${full[2]}Z`;
   const parsed = Date.parse(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
+  const result = Number.isFinite(parsed) ? parsed : null;
+  tieBreakTimeCache.set(post, result);
+  return result;
 }
 
 export function sortTimelinePostsByPublication(posts: TimelinePost[]): TimelinePost[] {
-  const times = new Map(posts.map(post => [post, timelinePublicationTime(post)]));
-  const ties = new Map(posts.map(post => [post, publicationTieBreakTime(post)]));
-  return [...posts].sort((a,b) => {
-    const left = times.get(a), right = times.get(b);
+  return [...posts].sort((a, b) => {
+    const left = timelinePublicationTime(a), right = timelinePublicationTime(b);
     if (left == null) return right == null ? 0 : 1;
     if (right == null) return -1;
     if (right !== left) return right - left;
-    const leftTie = ties.get(a), rightTie = ties.get(b);
+    const leftTie = publicationTieBreakTime(a), rightTie = publicationTieBreakTime(b);
     if (leftTie != null && rightTie != null && rightTie !== leftTie) return rightTie - leftTie;
     return 0;
   });
@@ -1017,10 +1261,6 @@ function deriveHandleFromProfileUrl(profileUrl?: string | null): { handle: strin
       candidate = working[working.length - 1];
     }
 
-    if (parsed.hostname.toLowerCase().includes('eporner')) {
-      candidate = candidate.replace(/-(?:[0-9]{2,}|(?=[A-Za-z0-9]{4,12}$)(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]+)$/, '');
-    }
-
     return {
       handle: sanitizeCreatorHandle(candidate),
       opaqueChannelId: isOpaqueYouTubeChannel,
@@ -1190,33 +1430,281 @@ export function pickFallbackStreamCandidate(options: {
 }
 
 const KNOWN_TIMELINE_PLATFORMS: ReadonlySet<TimelinePlatform> = new Set([
-  'eporner',
   'youtube',
-  'pornhub',
-  'xhamster',
+  'x',
+  'pinterest',
+  'imgur',
 ]);
 
 export function resolveTimelinePlatform(
   profileUrl?: string,
   explicitSite?: string
 ): TimelinePlatform | undefined {
-  const normalizedSite = (explicitSite || '').trim().toLowerCase() as TimelinePlatform;
-  if (KNOWN_TIMELINE_PLATFORMS.has(normalizedSite)) {
-    return normalizedSite;
+  const requestedSite = (explicitSite || '').trim().toLowerCase();
+  if (requestedSite === 'twitter') return 'x';
+  if (requestedSite && requestedSite !== 'generic' && requestedSite !== 'all' && requestedSite !== 'unknown') {
+    if (KNOWN_TIMELINE_PLATFORMS.has(requestedSite as TimelinePlatform)) {
+      return requestedSite as TimelinePlatform;
+    }
+    if (/^[a-z0-9][a-z0-9_-]{1,31}$/.test(requestedSite)) {
+      return requestedSite as TimelinePlatform;
+    }
   }
   if (profileUrl) {
+    const dynamicMatch = resolveDynamicSourceFromUrl(profileUrl);
+    if (dynamicMatch) return dynamicMatch as TimelinePlatform;
     try {
       const host = new URL(profileUrl).hostname.toLowerCase();
+      if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) return 'x';
       if (host === 'youtu.be' || /(?:^|\.)youtube\./.test(host)) return 'youtube';
-      if (/(?:^|\.)eporner\./.test(host)) return 'eporner';
-      if (/(?:^|\.)pornhub\./.test(host)) return 'pornhub';
-      if (/(?:^|\.)xhamster\./.test(host)) return 'xhamster';
+      if (host === 'pin.it' || /(?:^|\.)pinterest\./.test(host)) return 'pinterest';
+      if (/(?:^|\.)imgur\./.test(host)) return 'imgur';
     } catch {
       // Malformed profile URLs keep fallback resolution below.
     }
   }
-  if (normalizedSite === 'generic') return 'generic';
+  if (requestedSite === 'generic') return 'generic';
   return undefined;
+}
+
+function normalizeEntityRefs(raw: unknown): TimelineEntityRef[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: TimelineEntityRef[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const name = String((entry as Record<string, unknown>).name || '').trim();
+    if (!name) continue;
+    const url = typeof (entry as Record<string, unknown>).url === 'string'
+      ? String((entry as Record<string, unknown>).url).trim() || undefined
+      : undefined;
+    const kindRaw = (entry as Record<string, unknown>).kind;
+    const kind = typeof kindRaw === 'string' && kindRaw.trim()
+      ? (kindRaw.trim() as TimelineEntityRef['kind'])
+      : undefined;
+    const countRaw = (entry as Record<string, unknown>).count;
+    const count = typeof countRaw === 'number' && Number.isFinite(countRaw) ? countRaw : undefined;
+    result.push({ name, url, kind, count });
+  }
+  return result.length > 0 ? result : undefined;
+}
+
+function normalizeReleaseLinks(raw: unknown): TimelineReleaseMirrorLink[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: TimelineReleaseMirrorLink[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const url = String((entry as Record<string, unknown>).url || '').trim();
+    if (!url) continue;
+    const host = typeof (entry as Record<string, unknown>).host === 'string'
+      ? String((entry as Record<string, unknown>).host).trim() || undefined
+      : undefined;
+    const label = typeof (entry as Record<string, unknown>).label === 'string'
+      ? String((entry as Record<string, unknown>).label).trim() || undefined
+      : undefined;
+    result.push({ host, url, label });
+  }
+  return result.length > 0 ? result : undefined;
+}
+
+export function mapBrowseItemToTimelinePost(
+  item: Record<string, any>,
+  fallbackSource: TimelinePlatform = 'generic'
+): TimelinePost {
+  const originalUrl = String(item.originalUrl || item.url || item.albumUrl || '').trim();
+  const source = resolveTimelinePlatform(originalUrl, String(item.source || item.sourceSite || fallbackSource)) || fallbackSource;
+  const albumUrl = String(item.albumUrl || originalUrl || '').trim() || undefined;
+  const thumb = String(item.thumbnail || item.thumbnailUrl || '').trim();
+  const photos = Array.isArray(item.photos)
+    ? item.photos.filter((u): u is string => typeof u === 'string' && Boolean(u.trim()))
+    : (thumb ? [thumb] : []);
+  const previewHdUrl = typeof item.previewHdUrl === 'string' && item.previewHdUrl ? item.previewHdUrl : undefined;
+  const rawType = String(item.type || item.mediaType || 'album').toLowerCase();
+  const type: TimelinePost['type'] = rawType === 'gif'
+    ? 'gif'
+    : rawType === 'photo_grid'
+      ? 'photo_grid'
+      : rawType === 'text' || rawType === 'post'
+        ? 'text'
+        : rawType === 'video'
+          ? 'video'
+          : rawType === 'playlist'
+            ? 'playlist'
+            : 'album';
+
+  const photoItems: TimelinePhotoItem[] | undefined = photos.length > 0
+    ? photos.map((pUrl, idx) => ({
+        id: `${item.id || 'browse'}-${idx}`,
+        url: idx === 0 && previewHdUrl ? previewHdUrl : pUrl,
+        thumbnailUrl: pUrl,
+        pageUrl: albumUrl,
+        sourcePage: albumUrl,
+      }))
+    : undefined;
+
+  const artists = normalizeEntityRefs(item.artists);
+  const channels = normalizeEntityRefs(item.channels);
+  const tagEntities = normalizeEntityRefs(item.tagEntities);
+  const categories = normalizeEntityRefs(item.categories);
+  const previewVideoUrl = typeof item.previewVideoUrl === 'string' && item.previewVideoUrl.trim()
+    ? item.previewVideoUrl.trim()
+    : undefined;
+  const resolvedVideoUrl = typeof item.videoUrl === 'string' && item.videoUrl.trim()
+    ? item.videoUrl.trim()
+    : (type === 'video' && originalUrl ? `/api/proxy-video-stream?url=${encodeURIComponent(originalUrl)}` : undefined);
+  const releaseLinks = normalizeReleaseLinks(item.releaseLinks);
+  const releaseSpecs = Array.isArray(item.releaseSpecs)
+    ? item.releaseSpecs.filter((s): s is string => typeof s === 'string' && Boolean(s.trim()))
+    : undefined;
+  const threadKind = typeof item.threadKind === 'string' && item.threadKind.trim()
+    ? (item.threadKind.trim() as TimelineThreadKind)
+    : undefined;
+  const defaultLabel = TIMELINE_DEFAULT_LABEL(source);
+  const primaryArtistName = artists?.[0]?.name;
+  const rawCreatorName = String(item.creatorName || item.authorName || '').trim();
+  const creatorName = rawCreatorName || primaryArtistName || defaultLabel;
+
+  return {
+    id: String(item.id || `${source}-${Math.random().toString(36).slice(2, 10)}`),
+    creatorId: String(item.creatorId || item.sourcePage || `${source}:discover`),
+    creatorName,
+    creatorHandle: String(item.creatorHandle || `@${source}`),
+    creatorAvatar: String(item.creatorAvatar || thumb || ''),
+    creatorVerified: Boolean(item.creatorVerified),
+    type,
+    mediaType: typeof item.mediaType === 'string' ? item.mediaType : (type === 'gif' ? 'gif' : (type === 'video' ? 'video' : 'album')),
+    source,
+    sourcePage: typeof item.sourcePage === 'string' ? item.sourcePage : (artists?.[0]?.url || undefined),
+    originalUrl: originalUrl || undefined,
+    albumUrl,
+    playlistUrl: type === 'playlist' ? (originalUrl || undefined) : undefined,
+    videoUrl: resolvedVideoUrl,
+    previewVideoUrl,
+    youtubeId: typeof item.youtubeId === 'string' ? item.youtubeId : undefined,
+    isShort: typeof item.isShort === 'boolean' ? item.isShort : undefined,
+    duration: typeof item.duration === 'string' && item.duration.trim() ? item.duration.trim() : undefined,
+    views: typeof item.views === 'string' && item.views.trim() ? item.views.trim() : undefined,
+    resolution: typeof item.resolution === 'string' && item.resolution.trim() ? item.resolution.trim() : undefined,
+    rating: typeof item.rating === 'string' && item.rating.trim() ? item.rating.trim() : undefined,
+    videoCount: typeof item.videoCount === 'number' ? item.videoCount : undefined,
+    thumbnail: thumb || undefined,
+    previewHdUrl,
+    title: String(item.title || '').trim() || defaultLabel,
+    photos,
+    photoItems,
+    photoCount: typeof item.photoCount === 'number' ? item.photoCount : undefined,
+    tags: Array.isArray(item.tags) ? item.tags.filter((t): t is string => typeof t === 'string') : undefined,
+    tagEntities,
+    categories,
+    hosts: Array.isArray(item.hosts) ? item.hosts.filter((h): h is string => typeof h === 'string') : undefined,
+    artists,
+    channels,
+    releaseLinks,
+    releaseSpecs,
+    threadKind,
+    boardName: typeof item.boardName === 'string' && item.boardName.trim() ? item.boardName.trim() : undefined,
+    boardUrl: typeof item.boardUrl === 'string' && item.boardUrl.trim() ? item.boardUrl.trim() : undefined,
+    needsEnrichment: typeof item.needsEnrichment === 'boolean' ? item.needsEnrichment : undefined,
+    totalPages: typeof item.totalPages === 'number' ? item.totalPages : undefined,
+    replyCount: typeof item.replyCount === 'number' ? item.replyCount : undefined,
+    date: String(item.date || item.timeAgo || new Date().toISOString()),
+    likes: typeof item.likes === 'number' ? item.likes : null,
+    comments: Array.isArray(item.comments) ? item.comments : [],
+  };
+}
+
+export interface TimelineDirectUrlClassification {
+  kind: 'video' | 'playlist' | 'entity' | 'thread';
+  source: TimelinePlatform;
+  url: string;
+}
+
+const DIRECT_URL_SEARCH_PARAMS = new Set(['k', 'q', 'query', 'search', 'search_query']);
+
+export function classifyTimelineDirectUrl(rawInput: string): TimelineDirectUrlClassification | null {
+  const trimmed = String(rawInput || '').trim();
+  if (!/^https?:\/\/\S+$/i.test(trimmed)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname || '/';
+  const pathLower = path.toLowerCase();
+  for (const key of DIRECT_URL_SEARCH_PARAMS) {
+    if (parsed.searchParams.has(key)) return null;
+  }
+  if (pathLower === '/' || pathLower === '/search' || pathLower.startsWith('/search/')) {
+    return null;
+  }
+
+  // Built-in sources
+  if (host === 'youtu.be' || /(?:^|\.)youtube\./.test(host)) {
+    if (host === 'youtu.be' || pathLower === '/watch' || pathLower.startsWith('/shorts/') || pathLower.startsWith('/live/')) {
+      return { kind: 'video', source: 'youtube', url: trimmed };
+    }
+    if (pathLower === '/playlist' && parsed.searchParams.has('list')) {
+      return { kind: 'playlist', source: 'youtube', url: trimmed };
+    }
+    if (/^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/i.test(path)) {
+      return { kind: 'entity', source: 'youtube', url: trimmed };
+    }
+    return null;
+  }
+  if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) {
+    if (/^\/[^/]+\/status\/\d+/i.test(path)) {
+      return { kind: 'video', source: 'x', url: trimmed };
+    }
+    if (/^\/[A-Za-z0-9_]{1,32}\/?$/.test(path) && !['/explore', '/home', '/notifications', '/messages', '/i', '/settings'].includes(pathLower.replace(/\/$/, ''))) {
+      return { kind: 'entity', source: 'x', url: trimmed };
+    }
+    return null;
+  }
+  if (host === 'instagram.com' || host.endsWith('.instagram.com')) {
+    if (/^\/(?:p|reel|tv)\/[^/]+/i.test(path)) {
+      return { kind: 'video', source: 'instagram', url: trimmed };
+    }
+    if (/^\/[A-Za-z0-9_.-]{1,64}\/?$/.test(path)) {
+      return { kind: 'entity', source: 'instagram', url: trimmed };
+    }
+    return null;
+  }
+
+  // Dynamic connector sources driven solely by backend urlHints + capabilities
+  const dynSource = resolveDynamicSourceFromUrl(trimmed);
+  if (!dynSource) return null;
+  const hints = getDynamicUrlHints(dynSource);
+  const caps = getSourceCapabilities(dynSource);
+
+  if (hints?.videoPathRegex) {
+    try {
+      if (new RegExp(hints.videoPathRegex, 'i').test(path)) {
+        return { kind: 'video', source: dynSource, url: trimmed };
+      }
+    } catch { /* ignore invalid pattern */ }
+  }
+  if (hints?.playlistPathRegex) {
+    try {
+      if (new RegExp(hints.playlistPathRegex, 'i').test(path)) {
+        return { kind: 'playlist', source: dynSource, url: trimmed };
+      }
+    } catch { /* ignore invalid pattern */ }
+  }
+  if (caps.archetype === 'forum_board' && pathLower.includes('/threads/')) {
+    return { kind: 'thread', source: dynSource, url: trimmed };
+  }
+  if (Array.isArray(hints?.entityPrefixes) && hints!.entityPrefixes.some((p) => p && pathLower.startsWith(p.toLowerCase()))) {
+    return { kind: 'entity', source: dynSource, url: trimmed };
+  }
+  if (path !== '/' && path.length > 1) {
+    return { kind: 'entity', source: dynSource, url: trimmed };
+  }
+  return null;
+}
+
+function TIMELINE_DEFAULT_LABEL(source: TimelinePlatform): string {
+  return getDynamicSourceLabel(source) || String(source).toUpperCase();
 }
 
 function readStatCount(value: unknown): number | undefined {
@@ -1258,6 +1746,42 @@ function lookupBioStat(
   return undefined;
 }
 
+/** Format large numbers, locale-grouped counts, or compact strings into clean display metrics (e.g. 4.2B, 791.5K). */
+export function formatPortalMetric(
+  raw: string | number | null | undefined,
+  locale = 'en-US'
+): string | null {
+  if (raw === null || raw === undefined) return null;
+  const text = String(raw).replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  if (/%$/.test(text)) return text;
+  if (/^\d+(?:[.,]\d+)?\s*[kmbt]$/i.test(text)) {
+    return text.replace(/\s+/g, '').toUpperCase();
+  }
+  let num: number | null = null;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    num = raw;
+  } else {
+    const cleanNum = text.replace(/[^\d.,]/g, '');
+    if (/^\d{1,3}(?:[.,]\d{3})+$/.test(cleanNum)) {
+      num = Number(cleanNum.replace(/[.,]/g, ''));
+    } else if (/^\d+$/.test(cleanNum)) {
+      num = Number(cleanNum);
+    }
+  }
+  if (num === null || !Number.isFinite(num)) return text;
+  if (num >= 1_000_000_000) {
+    return `${(num / 1_000_000_000).toFixed(1).replace(/\.0$/, '')}B`;
+  }
+  if (num >= 1_000_000) {
+    return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  }
+  if (num >= 1_000) {
+    return `${(num / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+  }
+  return num.toLocaleString(locale);
+}
+
 /**
  * Merges real source-reported hero statistics onto previous creator stats
  * without fabricating missing values or letting unknown nulls erase known totals.
@@ -1270,14 +1794,14 @@ export function mergeTimelineCreatorStats(
   const next: TimelineCreatorStats = previous ? { ...previous } : {};
   const source = incoming && typeof incoming === 'object' ? incoming : null;
 
-  for (const key of ['videos', 'posts', 'albums', 'gifs'] as const) {
+  for (const key of ['videos', 'posts', 'albums', 'gifs', 'shorts'] as const) {
     const parsed = source ? readStatCount(source[key]) : undefined;
     if (parsed !== undefined) {
       next[key] = parsed;
     }
   }
 
-  for (const key of ['likes', 'subscribers', 'followers', 'views'] as const) {
+  for (const key of ['likes', 'subscribers', 'followers', 'views', 'rating'] as const) {
     const parsed = source ? readStatText(source[key]) : undefined;
     if (parsed !== undefined) {
       next[key] = parsed;
@@ -1302,4 +1826,65 @@ export function mergeTimelineCreatorStats(
   }
 
   return next;
+}
+
+export interface PlaylistVideoEntry {
+  id?: string;
+  title?: string;
+  originalUrl?: string;
+  pageUrl?: string;
+  url?: string;
+  streamUrl?: string;
+  previewVideoUrl?: string;
+  thumbnailUrl?: string;
+  duration?: string;
+  views?: string;
+  resolution?: string;
+  rating?: string;
+  timeAgo?: string;
+  uploadedAt?: string;
+}
+
+export function mapPlaylistVideosToTimelinePosts(
+  playlist: { id: string; title: string; url?: string },
+  creator: Pick<TimelineCreator, 'id' | 'name' | 'handle' | 'avatar' | 'site'>,
+  videos: readonly PlaylistVideoEntry[],
+  isEn: boolean,
+): TimelinePost[] {
+  return videos.map((v, vIdx) => {
+    const vUrl = (v.originalUrl || v.pageUrl || v.url || '').trim();
+    let ytId: string | undefined;
+    if (vUrl.includes('youtube.com/watch') || vUrl.includes('youtu.be/') || vUrl.includes('/shorts/')) {
+      const m =
+        vUrl.match(/[?&]v=([A-Za-z0-9_-]{11})/) ||
+        vUrl.match(/youtu\.be\/([A-Za-z0-9_-]{11})/) ||
+        vUrl.match(/\/shorts\/([A-Za-z0-9_-]{11})/);
+      if (m) ytId = m[1];
+    }
+    const stream = buildTimelineStreamUrl(v.streamUrl || vUrl, vUrl, undefined, ytId);
+    const detectedSite = vUrl ? resolveTimelinePlatform(vUrl) : undefined;
+    const postSource = detectedSite && detectedSite !== 'generic' ? detectedSite : (creator.site || 'generic');
+    const post: TimelinePost = {
+      id: `pl-vid-${playlist.id}-${v.id || vIdx}`,
+      creatorId: creator.id,
+      creatorName: creator.name,
+      creatorHandle: creator.handle,
+      creatorAvatar: creator.avatar,
+      type: 'video',
+      source: postSource,
+      youtubeId: ytId,
+      videoUrl: stream,
+      originalUrl: vUrl || undefined,
+      previewVideoUrl: v.previewVideoUrl || undefined,
+      thumbnail: v.thumbnailUrl || creator.avatar,
+      title: v.title || `${playlist.title} - ${isEn ? 'Video' : 'Vídeo'} ${vIdx + 1}`,
+      duration: v.duration || undefined,
+      views: v.views || undefined,
+      resolution: v.resolution || undefined,
+      comments: [],
+      likes: null,
+      date: v.timeAgo || v.uploadedAt || '',
+    };
+    return post;
+  });
 }

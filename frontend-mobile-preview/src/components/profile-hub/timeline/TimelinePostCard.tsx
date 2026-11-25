@@ -22,6 +22,9 @@ import {
   ListPlus,
   AlertCircle,
   X,
+  Repeat2,
+  BarChart2,
+  ExternalLink,
 } from 'lucide-react';
 import { useProfileHubLibraryStore } from '../../../store/useProfileHubLibraryStore';
 import { canonicalLibraryMediaKey, normalizeTimelinePostToLibraryItem } from '../../../services/profileHubLibraryModel';
@@ -38,8 +41,10 @@ import {
   isWatchPageOnlyUrl,
   normalizeTimelineQualities,
   resolveCreatorHandle,
+  resolveTimelinePlatform,
   upgradePhotoUrlFast,
 } from './timelineModel';
+import { getSourceCapabilities } from './timelineSourceCapabilities';
 import { getInitialsAvatar } from './TimelineStoriesBar';
 import { SourceAvatar } from '../common/SourceAvatar';
 import { useProfileTimelineStore } from '../../../store/useProfileTimelineStore';
@@ -62,6 +67,8 @@ import { isReducedMotionPreferred, runViewTransitionSafe } from '../../video-pla
 import { getSpeedMs } from '../../../services/motionConfig';
 import { type PlaybackDiagnostic, fromMediaError, fromHlsError, parsePlaybackDiagnostic, playbackDiagnosticMessage } from '../../video-player/engine/playbackDiagnostics';
 import './timeline-save-feedback.css';
+import { TimelineSocialBody, TimelineSocialCarousel, TimelineSocialMetricsRow } from './TimelineSocialContent';
+import { TimelinePostIdentity } from './TimelinePostIdentity';
 
 const useIsomorphicLayoutEffect =
   typeof document !== 'undefined' ? useLayoutEffect : useEffect;
@@ -90,7 +97,14 @@ export function timelinePlaybackRect(element: Element | null): TimelinePlaybackH
 
 interface TimelinePostCardProps {
   post: TimelinePost;
-  onOpenProfile: (creatorId: string) => void;
+  sourceLabel?: string;
+  onOpenProfile?: (creatorId: string, trigger?: HTMLElement) => void;
+  onOpenEntity?: (
+    entity: { name: string; url?: string; kind?: string },
+    source?: string,
+    trigger?: HTMLElement
+  ) => void;
+  onOpenThread?: (post: TimelinePost) => void;
   onOpenComments: (postId: string) => void;
   onOpenLightbox: (
     images: string[],
@@ -104,6 +118,7 @@ interface TimelinePostCardProps {
   autoStartWithControls?: boolean;
   isNextInQueue?: boolean;
   onOpenVideo?: (post: TimelinePost, handoff: TimelinePlaybackHandoff) => void | boolean;
+  onOpenPlaylist?: (post: TimelinePost) => void;
   watchPresentation?: boolean;
   playbackHandoff?: TimelinePlaybackHandoff;
   registerPlaybackSnapshot?: (snapshot: (() => TimelinePlaybackHandoff) | null) => void;
@@ -111,17 +126,22 @@ interface TimelinePostCardProps {
   onMinimizeToMiniPlayer?: () => void;
   isTheater?: boolean;
   onToggleTheater?: (next: boolean) => void;
+  onSelectSubfilter?: (subfilter: string) => void;
 }
 
 export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
   post,
+  sourceLabel,
   onOpenProfile,
+  onOpenEntity,
+  onOpenThread,
   onOpenComments,
   onOpenLightbox,
   isDesktop = false,
   autoStartWithControls = false,
   isNextInQueue = false,
   onOpenVideo,
+  onOpenPlaylist,
   watchPresentation = false,
   playbackHandoff,
   registerPlaybackSnapshot,
@@ -129,11 +149,21 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
   onMinimizeToMiniPlayer,
   isTheater,
   onToggleTheater,
+  onSelectSubfilter,
 }) => {
   const isEn = useAppStore((state) => state.settings?.language === 'en-US');
   const disableMotion = useAppStore((state) => Boolean(state.settings?.disableAllAnimations));
   const animationSpeed = useAppStore((state) => state.settings?.animationSpeed);
   const addNotification = useAppStore((state) => state.addNotification);
+  const sourcePlatform = resolveTimelinePlatform(post.originalUrl, post.source);
+  const sourceCaps = useMemo(() => getSourceCapabilities(sourcePlatform, post), [sourcePlatform, post]);
+  const isSocial = post.type === 'text' || post.text !== undefined || Boolean(post.relation || post.metrics)
+    || sourcePlatform === 'x' || sourcePlatform === 'instagram';
+  const socialText = (post.text || post.caption || (post.type === 'text' ? post.title : ''))?.trim();
+  const socialPhotos = isSocial && (post.type === 'photo_grid' || post.type === 'album')
+    ? (post.photos?.length ? post.photos : post.photoItems?.map(item => item.url))?.filter(Boolean) ?? []
+    : [];
+  const socialPreviews = socialPhotos.length ? new Map(post.photoItems?.map(item => [item.url, item.thumbnailUrl])) : undefined;
 
   const {
     likedPostIds,
@@ -298,8 +328,19 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
     void animation.finished.then(() => { if (closingAnimation.current === animation) finish(); }).catch(() => {});
   };
   clearFeedbackRef.current = closeSaveFeedback;
-  const engagementState = useProfileHubEngagementState(post.type === 'video' && !watchPresentation && !suspended ? timelineCommentsSourceUrl(post) : null, articleRef);
+  const engagementState = useProfileHubEngagementState(
+    post.type === 'video'
+    && !isSocial
+    && !watchPresentation
+    && !suspended
+    && (sourceCaps.supportsSourceLikes || sourceCaps.supportsComments)
+      ? timelineCommentsSourceUrl(post)
+      : null,
+    articleRef
+  );
   const engagement = engagementState.data;
+  const sourceLikeCount = engagement?.like_count;
+  const sourceCommentCount = engagement?.comment_count;
   const engagementLoading = engagementState.status === 'loading';
   const engagementMessage = engagementLoading
     ? (isEn ? 'Loading source counts…' : 'Carregando contagens da origem…')
@@ -459,9 +500,11 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
     }));
   }, []);
 
+  const hasUserClickedVideoRef = useRef(hasUserClickedVideo);
+  hasUserClickedVideoRef.current = hasUserClickedVideo;
+
   const markPlaybackFailed = useCallback((diagnostic?: PlaybackDiagnostic | null) => {
     if (!mountedRef.current) return;
-    setPlaybackDiagnostic(diagnostic || playbackDiagnosticRef.current || { stage: 'playback', code: 'unknown' });
     playbackGenerationRef.current++;
     qualitiesRequestRef.current?.controller.abort();
     qualitiesRequestRef.current = null;
@@ -475,9 +518,23 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
     loadedMasterHlsRef.current = undefined;
     setIsBuffering(false);
     setDecodedHeight(null);
+    // If this was a silent background autoplay preview in the feed (user never clicked play),
+    // revert cleanly to the poster thumbnail instead of covering the card with an error overlay.
+    if (!watchPresentation && !hasUserClickedVideoRef.current) {
+      setIsVideoReady(false);
+      setPlaybackError(false);
+      setAutoplayState(prev => ({
+        ...prev,
+        isPlaying: false,
+        isAutoplayPreview: false,
+        showControls: false,
+      }));
+      return;
+    }
+    setPlaybackDiagnostic(diagnostic || playbackDiagnosticRef.current || { stage: 'playback', code: 'unknown' });
     setPlaybackError(true);
     setAutoplayState(prev => ({ ...prev, isPlaying: false, hasUserClickedVideo: true, showControls: true }));
-  }, []);
+  }, [watchPresentation]);
 
   useEffect(() => {
     setQualities(normalizeTimelineQualities(playbackHandoff?.qualities || post.qualities, post.originalUrl));
@@ -811,7 +868,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
 
   // Only idle adjacent/hovered media preload. The playback effect owns active src.
   useEffect(() => {
-    if (suspended || post.type === 'photo_grid' || post.type === 'album') return;
+    if (suspended || post.type === 'text' || post.type === 'photo_grid' || post.type === 'album') return;
     const v = videoRef.current;
     if (!v || !activeStreamUrl) return;
 
@@ -850,6 +907,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
   useEffect(() => {
     if (
       !suspended && !watchPresentation && activeAutoplayPostId === post.id &&
+      post.type !== 'text' &&
       post.type !== 'photo_grid' &&
       post.type !== 'album'
     ) {
@@ -874,7 +932,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
 
   // Support autoStartWithControls when opened from creator Videos tab
   useEffect(() => {
-    if (!suspended && !watchPresentation && autoStartWithControls && post.type !== 'photo_grid' && post.type !== 'album') {
+    if (!suspended && !watchPresentation && autoStartWithControls && post.type !== 'text' && post.type !== 'photo_grid' && post.type !== 'album') {
       setActiveAutoplayPostId(post.id);
       setAutoplayState((prev) => ({
         ...computeAutoplayTransition(prev, 'video_click'),
@@ -885,7 +943,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
 
   // Mobile / Viewport Scroll Autoplay via IntersectionObserver
   useEffect(() => {
-    if (suspended || watchPresentation || post.type === 'photo_grid' || post.type === 'album') return;
+    if (suspended || watchPresentation || post.type === 'text' || post.type === 'photo_grid' || post.type === 'album') return;
     const el = mediaContainerRef.current;
     if (!el || typeof IntersectionObserver === 'undefined') return;
 
@@ -1258,7 +1316,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
   };
   const initialFallback = getInitialsAvatar(post.creatorName);
   const hasValidAvatar = Boolean(
-    post.creatorAvatar &&
+    typeof post.creatorAvatar === 'string' &&
       !post.creatorAvatar.startsWith('data:image/gif') &&
       post.creatorAvatar.length > 20
   );
@@ -1286,7 +1344,15 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
     Array.isArray(post.photos) ? post.photos.length : 0
   );
   // Grids use the source thumbnail; only the lightbox receives original URLs.
-  const albumGridUrls = [0, 1].map(index => post.photoItems?.[index]?.thumbnailUrl || post.photos?.[index] || '');
+  const effectiveAlbumPhotos = Array.isArray(post.photos) && post.photos.length > 0
+    ? post.photos
+    : (post.thumbnail ? [post.thumbnail] : []);
+  const albumGridUrls = [0, 1].map(index => post.photoItems?.[index]?.thumbnailUrl || effectiveAlbumPhotos[index] || '');
+  const isImageOnlyGif = post.type === 'gif'
+    && !post.videoUrl
+    && !post.masterHlsUrl
+    && !post.streamResolverUrl
+    && Boolean(post.thumbnail || post.originalUrl);
 
   const embeddedHighlights = useMemo(() => normalizePlayerHighlights(post), [post]);
   const universalVideoSource = useMemo<UniversalVideoSource>(() => ({
@@ -1377,61 +1443,54 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
     onMinimizeToMiniPlayer,
   ]);
 
+  const primaryArtist = post.artists?.[0];
+  const openCreatorOrArtist = (trigger?: HTMLElement) => {
+    if (primaryArtist?.url && onOpenEntity) {
+      onOpenEntity(primaryArtist, sourcePlatform, trigger);
+      return;
+    }
+    if (primaryArtist?.url && onOpenProfile) {
+      onOpenProfile(primaryArtist.url, trigger);
+      return;
+    }
+    onOpenProfile?.(post.creatorId, trigger);
+  };
+  const canOpenProfile = Boolean(onOpenProfile || (primaryArtist?.url && onOpenEntity));
+
   return (
     <article
       ref={articleRef}
       data-timeline-post-id={post.id}
       data-media-type={post.type}
+      data-timeline-source={sourcePlatform || 'generic'}
+      data-archetype={sourceCaps.archetype}
       onMouseEnter={() => setIsCardHovered(true)}
       onMouseLeave={() => setIsCardHovered(false)}
-      className={watchPresentation ? "relative w-full max-w-full min-w-0 bg-black sm:rounded-2xl overflow-hidden" : "relative w-full max-w-full min-w-0 bg-[var(--tl-surface)] border border-[var(--tl-border)] hover:border-[var(--tl-border-strong)] rounded-2xl p-3.5 shadow-xl space-y-2.5 smooth-transition"}
+      className={watchPresentation ? "relative w-full max-w-full min-w-0 bg-black sm:rounded-2xl overflow-hidden" : `tl-post tl-post--${sourcePlatform || 'generic'}`}
     >
       {/* Topo do Card */}
-      {!watchPresentation && <div className="flex items-center justify-between gap-2 min-w-0">
-        <div
-          data-post-creator-id={post.creatorId}
-          role="button"
-          tabIndex={0}
-          aria-label={isEn ? `View ${post.creatorName}'s profile` : `Ver perfil de ${post.creatorName}`}
-          onClick={() => onOpenProfile(post.creatorId)}
-          onKeyDown={event => {
-            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpenProfile(post.creatorId); }
-          }}
-          className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer group/author"
-        >
-          <SourceAvatar
+      {!watchPresentation && <div className="tl-post-header">
+        <TimelinePostIdentity
+          name={post.creatorName}
+          handle={resolveCreatorHandle({handle: post.creatorHandle, name: post.creatorName})}
+          platform={sourcePlatform}
+          sourceLabel={sourceLabel}
+          dateLabel={formatTimelineDate(post, isEn ? 'en-US' : 'pt-BR')}
+          dateTime={post.date || undefined}
+          creatorId={post.creatorId}
+          profileLabel={isEn ? `View ${post.creatorName}'s profile` : `Ver perfil de ${post.creatorName}`}
+          verifiedLabel={post.creatorVerified === true ? (isEn ? 'Verified creator' : 'Criador verificado') : undefined}
+          onOpenProfile={canOpenProfile ? (event => openCreatorOrArtist(event.currentTarget)) : undefined}
+          avatar={<SourceAvatar
             name={post.creatorName}
             src={hasValidAvatar ? post.creatorAvatar : null}
             profileUrl={creatorProfileUrl}
             referer={creatorProfileUrl || post.originalUrl}
             hydrate={!hasValidAvatar && Boolean(creatorProfileUrl)}
-            alt={post.creatorName}
-            className="w-11 h-11 sm:w-12 sm:h-12 rounded-full object-cover border border-[var(--tl-border-strong)] group-hover/author:border-[var(--tl-accent-hover)] group-hover/author:scale-105 smooth-transition bg-[var(--tl-surface-elevated)] shrink-0 shadow-md"
-          />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <h3 className="text-[15px] sm:text-base font-bold text-[var(--tl-text-primary)] group-hover/author:text-[var(--tl-accent-text)] smooth-transition truncate leading-tight">
-                {post.creatorName}
-              </h3>
-              {post.creatorVerified === true && <span className="w-4 h-4 rounded-full bg-[var(--tl-accent)] text-[var(--tl-accent-contrast)] flex items-center justify-center text-[10px] font-bold shrink-0" aria-label={isEn ? 'Verified creator' : 'Criador verificado'}>✓</span>}
-            </div>
-            <div className="flex items-center gap-1.5 min-w-0 text-xs text-[var(--tl-text-muted)] leading-tight mt-0.5">
-              {(() => {
-                const cleanHandle = resolveCreatorHandle({
-                  handle: post.creatorHandle,
-                  name: post.creatorName,
-                });
-                return cleanHandle ? (
-                  <>
-                    <span className="truncate">{cleanHandle}</span>
-                    <span className="opacity-70 shrink-0">•</span>
-                  </>
-                ) : null;
-              })()}
-              <span className="shrink-0">{formatTimelineDate(post, isEn ? 'en-US' : 'pt-BR')}</span>
-            </div>
-          </div>
-        </div>
+            alt=""
+            className="h-full w-full object-cover"
+          />}
+        />
 
         <div className="relative shrink-0">
           <button
@@ -1443,14 +1502,14 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
               setShowQualityMenu(false);
               setShowOptionsMenu((prev) => !prev);
             }}
-            className="p-2 text-[var(--tl-text-muted)] hover:text-[var(--tl-text-primary)] hover:bg-[var(--tl-surface-hover)] rounded-lg smooth-transition -mr-1"
+            className="tl-post-action text-[var(--tl-text-muted)] hover:text-[var(--tl-text-primary)]"
             title={isEn ? 'Options' : 'Opções'}
             aria-label={isEn ? 'Options' : 'Opções'}
           >
             <MoreHorizontal className="w-5 h-5" />
           </button>
           {showOptionsMenu && (
-            <div ref={optionsMenuRef} id={optionsMenuId} className="absolute right-0 top-full mt-1 w-52 bg-[var(--tl-surface-elevated)] border border-[var(--tl-border-strong)] rounded-xl shadow-2xl p-1 z-30 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150">
+            <div ref={optionsMenuRef} id={optionsMenuId} className="tl-post-menu absolute right-0 top-full mt-1 w-52 bg-[var(--tl-surface-elevated)] border border-[var(--tl-border-strong)] rounded-xl shadow-2xl p-1 z-30 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150">
               <button
                 type="button"
                 onClick={() => {
@@ -1462,17 +1521,23 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
                 <Share2 className="w-3.5 h-3.5 text-[var(--tl-accent-text)]" />
                 <span>{isEn ? 'Copy post link' : 'Copiar link do post'}</span>
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowOptionsMenu(false);
-                  onOpenProfile(post.creatorId);
-                }}
-                className="w-full text-left px-3 py-2 text-xs text-[var(--tl-text-primary)] hover:bg-[var(--tl-surface-hover)] rounded-lg flex items-center gap-2 transition-colors cursor-pointer"
-              >
-                <UserPlus className="w-3.5 h-3.5 text-[var(--tl-accent-text)]" />
-                <span>{isEn ? 'View creator profile' : 'Ver perfil do criador'}</span>
-              </button>
+              {(onOpenProfile || (primaryArtist?.url && onOpenEntity)) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowOptionsMenu(false);
+                    openCreatorOrArtist(optionsTriggerRef.current ?? undefined);
+                  }}
+                  className="w-full text-left px-3 py-2 text-xs text-[var(--tl-text-primary)] hover:bg-[var(--tl-surface-hover)] rounded-lg flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <UserPlus className="w-3.5 h-3.5 text-[var(--tl-accent-text)]" />
+                  <span>
+                    {primaryArtist
+                      ? (isEn ? `View ${primaryArtist.name}` : `Ver perfil de ${primaryArtist.name}`)
+                      : (isEn ? 'View creator profile' : 'Ver perfil do criador')}
+                  </span>
+                </button>
+              )}
               {post.originalUrl && (
                 <a
                   href={post.originalUrl}
@@ -1491,17 +1556,85 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
       </div>
 
       }
+      {!watchPresentation && (isSocial || Boolean(post.description && post.originalUrl?.includes('/post/'))) && <TimelineSocialBody
+        key={post.id} text={socialText || post.description} relation={post.relation} isEn={isEn}
+        onOpenReferencedMedia={(images, index, title) => onOpenLightbox(images, index, title)}
+      />}
       {/* Mídia do Post */}
-      {(post.type === 'photo_grid' || post.type === 'album') ? (
-        Array.isArray(post.photos) && post.photos.length > 0 ? (
-        <div className={`grid ${post.photos.length > 1 ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5 rounded-2xl overflow-hidden mt-2.5`}>
+      {post.type === 'text' ? null : post.type === 'playlist' ? (
+        <div className="tl-post-media">
+          <div className="tl-post-frame relative aspect-video w-full overflow-hidden rounded-xl bg-black/80 group">
+            {post.thumbnail ? (
+              <img
+                src={post.thumbnail}
+                alt={post.title}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center bg-white/5 text-xs text-[var(--tl-text-muted)]">
+                {isEn ? 'Playlist' : 'Playlist'}
+              </div>
+            )}
+            <div className="absolute inset-y-0 right-0 flex w-2/5 max-w-[180px] flex-col items-center justify-center gap-1.5 bg-black/75 backdrop-blur-md text-white px-3 text-center">
+              <ListPlus className="h-6 w-6 text-rose-400" />
+              <span className="text-sm font-bold">
+                {post.videoCount ?? post.photoCount ?? '—'} {isEn ? 'videos' : 'vídeos'}
+              </span>
+              <span className="text-[11px] text-white/75">
+                {isEn ? 'Full playlist' : 'Playlist completa'}
+              </span>
+            </div>
+            {onOpenPlaylist ? (
+              <>
+                <button
+                  type="button"
+                  data-playlist-open-inapp="true"
+                  onClick={() => onOpenPlaylist(post)}
+                  className="absolute inset-0 z-10 cursor-pointer bg-transparent"
+                  aria-label={isEn ? `Open playlist ${post.title}` : `Abrir playlist ${post.title}`}
+                />
+                {post.originalUrl && (
+                  <a
+                    href={post.originalUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="relative z-20 inline-flex items-center gap-1 m-2.5 rounded-full bg-black/75 px-2.5 py-1 text-[11px] font-semibold text-white/90 hover:text-white border border-white/15 backdrop-blur-md"
+                    aria-label={isEn ? `Open on source: ${post.title}` : `Abrir na fonte: ${post.title}`}
+                  >
+                    <ExternalLink className="h-3 w-3" aria-hidden />
+                    <span>{isEn ? 'Open on source' : 'Abrir na fonte'}</span>
+                  </a>
+                )}
+              </>
+            ) : (
+              post.originalUrl && (
+                <a
+                  href={post.originalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="absolute inset-0 z-10"
+                  aria-label={isEn ? `Open playlist ${post.title}` : `Abrir playlist ${post.title}`}
+                />
+              )
+            )}
+          </div>
+        </div>
+      ) : socialPhotos.length > 0 ? (
+        <TimelineSocialCarousel key={post.id} images={socialPhotos} previews={socialPhotos.map(url => socialPreviews?.get(url) || url)} sourceUrl={post.originalUrl} isEn={isEn}
+          onOpen={index => onOpenLightbox(socialPhotos, index, post.title, undefined, post.photoItems, post.photoCount)} />
+      ) : isSocial && post.type === 'photo_grid' ? null : (post.type === 'photo_grid' || post.type === 'album' || (!sourceCaps.supportsNativePlayback && !isImageOnlyGif && !(post.type === 'video' && (post.videoUrl || post.masterHlsUrl || (post.qualities && post.qualities.length > 0))))) ? (
+        effectiveAlbumPhotos.length > 0 ? (
+        <div className={`tl-post-media relative grid ${effectiveAlbumPhotos.length > 1 ? 'grid-cols-2' : 'grid-cols-1'} gap-1`}>
           <button
             type="button"
             aria-label={isEn ? 'Open album photo 1' : 'Abrir foto 1 do álbum'}
-            className="relative cursor-pointer group overflow-hidden"
+            className="tl-post-frame relative cursor-pointer overflow-hidden"
             onClick={() =>
               onOpenLightbox(
-                post.photos || [],
+                effectiveAlbumPhotos,
                 0,
                 post.title,
                 post.albumUrl || post.originalUrl,
@@ -1515,7 +1648,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
               loading="lazy"
               alt={isEn ? 'Photo 1' : 'Foto 1'}
               referrerPolicy="no-referrer"
-              className="w-full h-48 object-cover group-hover:scale-105 transition-transform duration-300"
+              className="h-full w-full object-cover"
               onError={(e) => {
                 const imgEl = e.currentTarget as HTMLImageElement;
                 const rawUrl = albumGridUrls[0];
@@ -1529,14 +1662,19 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
                 }
               }}
             />
+            {totalAlbumPhotos > 0 && (
+              <span className="pointer-events-none absolute top-2 right-2 z-10 inline-flex items-center gap-1 rounded-full bg-black/75 px-2.5 py-0.5 font-mono text-[11px] font-bold text-white backdrop-blur-md">
+                {totalAlbumPhotos}
+              </span>
+            )}
           </button>
-          {post.photos.length > 1 && <button
+          {effectiveAlbumPhotos.length > 1 && <button
             type="button"
             aria-label={isEn ? 'Open album photo 2' : 'Abrir foto 2 do álbum'}
-            className="relative cursor-pointer group overflow-hidden"
+            className="tl-post-frame relative cursor-pointer overflow-hidden"
             onClick={() =>
               onOpenLightbox(
-                post.photos || [],
+                effectiveAlbumPhotos,
                 1,
                 post.title,
                 post.albumUrl || post.originalUrl,
@@ -1550,7 +1688,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
               loading="lazy"
               alt={isEn ? 'Photo 2' : 'Foto 2'}
               referrerPolicy="no-referrer"
-              className="w-full h-48 object-cover group-hover:scale-105 transition-transform duration-300"
+              className="h-full w-full object-cover"
               onError={(e) => {
                 const imgEl = e.currentTarget as HTMLImageElement;
                 const rawUrl = albumGridUrls[1];
@@ -1565,21 +1703,98 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
               }}
             />
             {totalAlbumPhotos > 2 && (
-              <div className="absolute inset-0 bg-black/60 flex items-center justify-center font-bold text-white text-sm backdrop-blur-[2px]">
+              <div className="absolute bottom-2 right-2 rounded-md bg-black/75 px-2.5 py-1 font-bold text-white text-sm">
                 +{totalAlbumPhotos - 2}
               </div>
             )}
           </button>}
         </div>
         ) : (
-          <div className="w-full aspect-video rounded-2xl bg-black flex items-center justify-center mt-2.5 text-xs text-gray-400">
-            {post.albumUrl || post.originalUrl ? (
-              <button type="button" className="rounded-lg bg-[var(--tl-accent)] px-3 py-2 text-[var(--tl-accent-contrast)] hover:bg-[var(--tl-accent-hover)]" onClick={() => onOpenLightbox([], 0, post.title, post.albumUrl || post.originalUrl, post.photoItems, post.photoCount)}>
-                {isEn ? 'Load album photos' : 'Carregar fotos do álbum'}
-              </button>
-            ) : <span>{isEn ? 'No photos available' : 'Nenhuma foto disponível'}</span>}
+          <div className="tl-forum-thread-fallback mt-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--tl-accent-soft)] px-2.5 py-1 text-[11px] font-bold text-[var(--tl-accent-text-strong)]">
+                {post.threadKind === 'video_release'
+                  ? (isEn ? 'Video Release' : 'Lançamento de Vídeo')
+                  : post.threadKind === 'download_pack'
+                    ? (isEn ? 'Download Pack' : 'Pacote para Download')
+                    : sourceCaps.supportsThreadReader
+                      ? (isEn ? 'Thread Gallery' : 'Galeria de Tópico')
+                      : (isEn ? 'Photo Album' : 'Álbum de Fotos')}
+              </span>
+              {typeof post.totalPages === 'number' && post.totalPages > 1 && (
+                <span className="rounded-md border border-[var(--tl-border)] bg-[var(--tl-surface)] px-2 py-0.5 font-mono text-[11px] text-[var(--tl-text-secondary)]">
+                  Pg 1/{post.totalPages}
+                </span>
+              )}
+            </div>
+            {Array.isArray(post.hosts) && post.hosts.length > 0 && (
+              <div className="tl-tags-strip">
+                {post.hosts.map((host) => (
+                  <span key={host} className="tl-tag-chip font-mono">
+                    {host}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              {sourceCaps.supportsThreadReader && onOpenThread && (post.originalUrl || post.albumUrl) ? (
+                <button
+                  type="button"
+                  data-open-thread-reader
+                  className="min-h-11 rounded-xl bg-[var(--tl-accent)] px-3.5 py-2 text-xs font-bold text-[var(--tl-accent-contrast)] hover:bg-[var(--tl-accent-hover)]"
+                  onClick={() => onOpenThread(post)}
+                >
+                  {isEn ? 'Open Thread' : 'Ler Tópico'}
+                </button>
+              ) : post.albumUrl || post.originalUrl ? (
+                <button
+                  type="button"
+                  className="min-h-11 rounded-xl bg-[var(--tl-accent)] px-3.5 py-2 text-xs font-bold text-[var(--tl-accent-contrast)] hover:bg-[var(--tl-accent-hover)]"
+                  onClick={() => onOpenLightbox([], 0, post.title, post.albumUrl || post.originalUrl, post.photoItems, post.photoCount)}
+                >
+                  {isEn ? 'Load Gallery' : 'Carregar Galeria'}
+                </button>
+              ) : <span className="text-xs text-[var(--tl-text-muted)]">{isEn ? 'No photos available' : 'Nenhuma foto disponível'}</span>}
+            </div>
           </div>
         )
+      ) : isImageOnlyGif ? (
+        <div className="tl-post-media relative">
+          <button
+            type="button"
+            aria-label={isEn ? `Open GIF ${post.title}` : `Abrir GIF ${post.title}`}
+            className="tl-post-frame relative w-full cursor-pointer overflow-hidden"
+            onClick={() =>
+              onOpenLightbox(
+                [post.previewHdUrl || post.thumbnail || post.originalUrl || ''].filter(Boolean),
+                0,
+                post.title,
+                post.albumUrl || post.originalUrl,
+                post.photoItems,
+                post.photoCount
+              )
+            }
+          >
+            <img
+              src={post.thumbnail || post.originalUrl || initialFallback}
+              loading="lazy"
+              alt={post.title}
+              referrerPolicy="no-referrer"
+              className="h-full w-full object-cover"
+              onError={(e) => {
+                const imgEl = e.currentTarget as HTMLImageElement;
+                const rawUrl = post.thumbnail || post.originalUrl || '';
+                if (!imgEl.dataset.proxied && rawUrl.startsWith('http')) {
+                  imgEl.dataset.proxied = '1';
+                  imgEl.src = `/api/proxy-image?url=${encodeURIComponent(rawUrl)}`;
+                }
+              }}
+            />
+            <span className="pointer-events-none absolute top-2.5 right-2.5 z-10 rounded bg-black/75 px-2 py-0.5 font-mono text-[10px] font-bold text-white border border-white/10">
+              GIF
+            </span>
+          </button>
+        </div>
       ) : (
         <div
           ref={mediaContainerRef}
@@ -1597,7 +1812,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
           onMouseEnter={handleMouseEnterVideo}
           onMouseLeave={handleMouseLeaveVideo}
           style={watchPresentation ? {'--timeline-watch-aspect': decodedAspect?.identity === videoIdentity ? decodedAspect.ratio : '16 / 9'} as React.CSSProperties : { touchAction: 'pan-y' }}
-          className={`relative overflow-hidden bg-black border-y border-[var(--tl-border)] ${watchPresentation ? '' : 'cursor-pointer'} [&:fullscreen]:max-h-none [&:fullscreen]:w-screen [&:fullscreen]:h-screen [&:fullscreen]:aspect-auto ${watchPresentation ? (isTheater ? "w-full aspect-[var(--timeline-watch-aspect)] max-h-[min(78dvh,720px)]" : "w-full aspect-[var(--timeline-watch-aspect)] max-h-[60dvh]") : "-mx-3.5 !w-[calc(100%+1.75rem)] !max-w-none aspect-video mt-2.5"}`}
+          className={`relative overflow-hidden bg-black [&:fullscreen]:max-h-none [&:fullscreen]:w-screen [&:fullscreen]:h-screen [&:fullscreen]:aspect-auto ${watchPresentation ? (isTheater ? "border-y border-[var(--tl-border)] w-full aspect-[var(--timeline-watch-aspect)] max-h-[min(78dvh,720px)]" : "border-y border-[var(--tl-border)] w-full aspect-[var(--timeline-watch-aspect)] max-h-[60dvh]") : "tl-post-media aspect-video w-full cursor-pointer"}`}
         >
           {watchPresentation && post.type !== 'gif' ? (
             hostMounted ? (
@@ -1669,6 +1884,8 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
                 <img
                   src={post.thumbnail || post.creatorAvatar || initialFallback}
                   alt={post.title}
+                  loading="lazy"
+                  decoding="async"
                   referrerPolicy="no-referrer"
                   onClick={handleVideoClick}
                   onError={(e) => {
@@ -1702,12 +1919,23 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
                   </div>
                 ) : null}
 
-                {/* Qualidade Máxima do Vídeo na Direita Superior */}
-                <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
-                  <span className="px-2 py-0.5 rounded bg-black/70 backdrop-blur-md text-white font-bold text-[10px] font-mono shadow-sm">
-                    {maxQualityLabel}
-                  </span>
-                </div>
+                {/* Qualidade Máxima do Vídeo na Direita Superior (somente quando conhecida) */}
+                {(maxQualityLabel !== '—' || post.type === 'gif') && (
+                  <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
+                    <span className="px-2 py-0.5 rounded bg-black/75 backdrop-blur-md text-white font-bold text-[10px] font-mono shadow-sm border border-white/10">
+                      {maxQualityLabel !== '—' ? maxQualityLabel : 'GIF'}
+                    </span>
+                  </div>
+                )}
+
+                {/* Duração do Vídeo na Direita Inferior */}
+                {post.duration && (
+                  <div className="absolute bottom-2.5 right-2.5 pointer-events-none z-10">
+                    <span className="px-2 py-0.5 rounded bg-black/80 backdrop-blur-md text-white font-bold text-[10px] font-mono tabular-nums shadow-sm border border-white/10">
+                      {post.duration}
+                    </span>
+                  </div>
+                )}
 
                 <button
                   type="button"
@@ -1889,51 +2117,263 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
 
       {!watchPresentation && <>
       {/* Título Limpo */}
-      <h4 className="text-xs font-bold text-[var(--tl-text-primary)] line-clamp-2 pt-1 leading-snug break-words min-w-0">
+      {(!isSocial || (!socialText && !post.relation)) && <h4 className="tl-post-copy font-semibold line-clamp-2">
         {post.title}
-      </h4>
-
-      {/* Barra de Ações Mobile & Desktop: Ícones Puros Sem Quebra */}
-      <div className="flex items-center justify-between gap-2 min-w-0 pt-1 border-t border-[var(--tl-border)] text-xs">
-        <div className="flex items-center gap-4">
-          {/* Curtir */}
+      </h4>}
+      {((Array.isArray(post.artists) && post.artists.length > 0)
+        || (Array.isArray(post.channels) && post.channels.length > 0)
+        || (Array.isArray(post.releaseSpecs) && post.releaseSpecs.length > 0)) && (
+        <div className="tl-tags-strip">
+          {post.artists?.map((artist) => (
+            <button
+              key={`artist-${artist.url || artist.name}`}
+              type="button"
+              data-entity-chip="artist"
+              onClick={(e) => {
+                if (onOpenEntity) onOpenEntity(artist, sourcePlatform, e.currentTarget);
+                else if (artist.url) onOpenProfile?.(artist.url, e.currentTarget);
+              }}
+              className="tl-entity-chip"
+            >
+              {artist.name}
+            </button>
+          ))}
+          {post.channels?.map((channel) => (
+            <button
+              key={`channel-${channel.url || channel.name}`}
+              type="button"
+              data-entity-chip="channel"
+              onClick={(e) => {
+                if (onOpenEntity) onOpenEntity(channel, sourcePlatform, e.currentTarget);
+                else if (channel.url) onOpenProfile?.(channel.url, e.currentTarget);
+              }}
+              className="tl-tag-chip hover:border-[var(--tl-accent-border)] hover:text-[var(--tl-text-primary)]"
+            >
+              {channel.name}
+            </button>
+          ))}
+          {post.releaseSpecs?.slice(0, 4).map((spec) => (
+            <span key={`spec-${spec}`} className="tl-tag-chip font-mono">
+              {spec}
+            </span>
+          ))}
+        </div>
+      )}
+      {Array.isArray(post.releaseLinks) && post.releaseLinks.length > 0 && (
+        <div className="tl-tags-strip">
+          {post.releaseLinks.slice(0, 6).map((link, idx) => (
+            <a
+              key={`${link.url}-${idx}`}
+              href={link.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="tl-release-mirror-chip"
+            >
+              <ExternalLink className="h-3 w-3 shrink-0" aria-hidden />
+              <span>{link.label || link.host || (isEn ? 'Mirror' : 'Link')}</span>
+            </a>
+          ))}
+        </div>
+      )}
+      {sourceCaps.supportsThreadReader && onOpenThread && (post.originalUrl || post.albumUrl) && !(effectiveAlbumPhotos.length === 0 && !sourceCaps.supportsNativePlayback) && (
+        <div className="flex flex-wrap items-center gap-2 pt-0.5">
           <button
             type="button"
-            onClick={() => toggleLike(post.id, post)}
-            className={`flex items-center gap-1.5 smooth-transition active:scale-95 ${
-              isLiked ? 'text-rose-500 fill-rose-500' : 'text-[var(--tl-text-muted)] hover:text-rose-400'
-            }`}
-            title={isLiked ? (isEn ? 'Remove local like mark' : 'Remover marcação local de curtida') : isEn ? 'Mark as liked on this device' : 'Marcar curtida neste dispositivo'}
-            aria-label={isLiked ? (isEn ? 'Remove local like mark' : 'Remover marcação local de curtida') : isEn ? 'Mark as liked on this device' : 'Marcar curtida neste dispositivo'}
-            aria-pressed={isLiked}
+            data-open-thread-reader
+            onClick={() => onOpenThread(post)}
+            className="tl-entity-chip"
           >
-            <Heart className={`w-4 h-4 ${isLiked ? `fill-rose-500 text-rose-500${disableMotion ? '' : ' heart-pop'}` : ''}`} />
-            <span data-source-like-count className="text-[11px] font-mono" title={engagement?.like_count == null ? engagementMessage || unknownCountLabel : undefined}>
-              {engagementLoading && engagement?.like_count == null
-                ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin motion-reduce:animate-none" />
-                : engagement?.like_count ?? '—'}
-            </span>
+            {isEn ? 'Read full thread' : 'Ler tópico completo'}
           </button>
+        </div>
+      )}
+      {Array.isArray(post.categories) && post.categories.length > 0 && (
+        <div className="tl-tags-strip" data-category-strip>
+          {post.categories.slice(0, 4).map((cat, idx) => (
+            <button
+              key={`cat-${cat.name}-${idx}`}
+              type="button"
+              data-category-chip={cat.name}
+              onClick={() => {
+                if (cat.url && onOpenEntity) {
+                  onOpenEntity({ name: cat.name, url: cat.url, kind: 'category' });
+                } else {
+                  onSelectSubfilter?.(cat.name);
+                }
+              }}
+              className="tl-category-chip"
+            >
+              {cat.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {Array.isArray(post.tags) && post.tags.length > 0 && (
+        <div className="tl-tags-strip">
+          {post.tags.slice(0, 6).map((rawTag, idx) => {
+            const tagLabel = typeof rawTag === 'string'
+              ? rawTag.trim()
+              : String((rawTag as unknown as { name?: string })?.name || '').trim();
+            if (!tagLabel) return null;
+            const tagUrl = typeof rawTag === 'object' && rawTag !== null
+              ? (rawTag as unknown as { url?: string }).url
+              : post.tagEntities?.find((e) => e.name.toLowerCase() === tagLabel.toLowerCase())?.url;
+            return (
+              <button
+                key={`${tagLabel}-${idx}`}
+                type="button"
+                onClick={() => {
+                  if (tagUrl && onOpenEntity) {
+                    onOpenEntity({ name: tagLabel, url: tagUrl, kind: 'tag' });
+                  } else {
+                    onSelectSubfilter?.(tagLabel);
+                  }
+                }}
+                className="tl-tag-chip hover:border-[var(--tl-accent-border)] hover:text-[var(--tl-text-primary)]"
+              >
+                #{tagLabel}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {isSocial && <TimelineSocialMetricsRow
+        metrics={{ likes: typeof post.likes === 'number' && Number.isSafeInteger(post.likes) && post.likes >= 0 ? post.likes : null, ...post.metrics }}
+        isEn={isEn} />}
 
-          {/* Comentários */}
-          <button
-            type="button"
-            onClick={() => onOpenComments(post.id)}
-            className="flex items-center gap-1.5 text-[var(--tl-text-muted)] hover:text-[var(--tl-accent-text)] active:text-[var(--tl-accent-text-strong)] smooth-transition active:scale-95"
-            title={isEn ? 'View comments' : 'Ver comentários'}
-            aria-label={isEn ? 'View comments' : 'Ver comentários'}
-          >
-            <MessageSquare className="w-4 h-4" />
-            <span data-source-comment-count className="text-[11px] font-mono" title={engagement?.comment_count == null ? engagementMessage || unknownCountLabel : undefined}>
-              {engagementLoading && engagement?.comment_count == null
-                ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin motion-reduce:animate-none" />
-                : engagement?.comment_count ?? '—'}
-            </span>
-          </button>
+      {/* Barra de Ações Adaptativa por Plataforma (X, Instagram, YouTube e Estúdios/Catálogos) */}
+      <div className={`tl-post-footer tl-post-native-actions tl-post-footer--${sourcePlatform || 'generic'}`} data-footer-platform={sourcePlatform || 'generic'}>
+        <div className="tl-post-actions-primary flex items-center gap-1">
+          {sourcePlatform === 'x' ? (
+            <>
+              {/* X: Responder / Comentários */}
+              <button
+                type="button"
+                onClick={() => onOpenComments(post.id)}
+                className="tl-action-btn tl-action-btn--reply flex items-center gap-1.5 text-[var(--tl-text-muted)] hover:text-sky-400 active:scale-95 smooth-transition"
+                title={isEn ? 'View replies & comments' : 'Ver respostas e comentários'}
+                aria-label={isEn ? 'View comments' : 'Ver comentários'}
+              >
+                <MessageSquare className="w-4 h-4" />
+                {post.metrics?.replies != null && (
+                  <span className="text-[11px] font-mono">{post.metrics.replies}</span>
+                )}
+              </button>
+
+              {/* X Exclusivo: Repost / Retweet */}
+              {post.originalUrl ? (
+                <a
+                  href={post.originalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-x-repost-action
+                  className="tl-action-btn tl-action-btn--repost inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-lg px-2 text-[var(--tl-text-muted)] hover:bg-emerald-500/10 hover:text-emerald-400 active:scale-95 smooth-transition"
+                  title={isEn ? 'Repost / Quote on X' : 'Republicar / Retweetar no X'}
+                  aria-label={isEn ? 'Repost on X' : 'Republicar no X'}
+                >
+                  <Repeat2 className="w-4 h-4" />
+                  {post.metrics?.reposts != null && (
+                    <span className="text-[11px] font-mono">{post.metrics.reposts}</span>
+                  )}
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  data-x-repost-action
+                  onClick={handleShare}
+                  className="tl-action-btn tl-action-btn--repost flex items-center gap-1.5 text-[var(--tl-text-muted)] hover:text-emerald-400 active:scale-95 smooth-transition"
+                  title={isEn ? 'Copy link to repost' : 'Copiar link para republicar'}
+                  aria-label={isEn ? 'Copy link to repost' : 'Copiar link para republicar'}
+                >
+                  <Repeat2 className="w-4 h-4" />
+                  {post.metrics?.reposts != null && (
+                    <span className="text-[11px] font-mono">{post.metrics.reposts}</span>
+                  )}
+                </button>
+              )}
+
+              {/* X: Curtir */}
+              <button
+                type="button"
+                onClick={() => toggleLike(post.id, post)}
+                className={`tl-action-btn tl-action-btn--like flex items-center gap-1.5 smooth-transition active:scale-95 ${
+                  isLiked ? 'text-rose-500 fill-rose-500' : 'text-[var(--tl-text-muted)] hover:text-rose-400'
+                }`}
+                title={isLiked ? (isEn ? 'Remove local like mark' : 'Remover marcação local de curtida') : isEn ? 'Mark as liked on this device' : 'Marcar curtida neste dispositivo'}
+                aria-label={isLiked ? (isEn ? 'Remove local like mark' : 'Remover marcação local de curtida') : isEn ? 'Mark as liked on this device' : 'Marcar curtida neste dispositivo'}
+                aria-pressed={isLiked}
+              >
+                <Heart className={`w-4 h-4 ${isLiked ? `fill-rose-500 text-rose-500${disableMotion ? '' : ' heart-pop'}` : ''}`} />
+                {(post.metrics?.likes != null || typeof post.likes === 'number') && (
+                  <span className="text-[11px] font-mono">{post.metrics?.likes ?? post.likes}</span>
+                )}
+              </button>
+
+              {/* X: Visualizações */}
+              {(post.metrics?.views != null || post.views) && (
+                <span className="tl-x-views-pill hidden sm:inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono text-[var(--tl-text-muted)]" title={isEn ? 'Views on X' : 'Visualizações no X'}>
+                  <BarChart2 className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>{post.metrics?.views ?? post.views}</span>
+                </span>
+              )}
+            </>
+          ) : (
+            <>
+              {/* Curtir (Instagram / YouTube / Catálogos) */}
+              <button
+                type="button"
+                onClick={() => toggleLike(post.id, post)}
+                className={`tl-action-btn tl-action-btn--like flex items-center gap-1.5 smooth-transition active:scale-95 ${
+                  isLiked ? 'text-rose-500 fill-rose-500' : 'text-[var(--tl-text-muted)] hover:text-rose-400'
+                }`}
+                title={isLiked ? (isEn ? 'Remove local like mark' : 'Remover marcação local de curtida') : isEn ? 'Mark as liked on this device' : 'Marcar curtida neste dispositivo'}
+                aria-label={isLiked ? (isEn ? 'Remove local like mark' : 'Remover marcação local de curtida') : isEn ? 'Mark as liked on this device' : 'Marcar curtida neste dispositivo'}
+                aria-pressed={isLiked}
+              >
+                <Heart className={`w-4 h-4 ${isLiked ? `fill-rose-500 text-rose-500${disableMotion ? '' : ' heart-pop'}` : ''}`} />
+                {!isSocial && sourceCaps.supportsSourceLikes && <span data-source-like-count className="text-[11px] font-mono" title={sourceLikeCount == null ? engagementMessage || unknownCountLabel : undefined}>
+                  {engagementLoading && sourceLikeCount == null
+                    ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin motion-reduce:animate-none" />
+                    : sourceLikeCount ?? '—'}
+                </span>}
+              </button>
+
+              {/* Comentários */}
+              {sourceCaps.supportsComments && (
+                <button
+                  type="button"
+                  onClick={() => onOpenComments(post.id)}
+                  className="tl-action-btn tl-action-btn--comment flex items-center gap-1.5 text-[var(--tl-text-muted)] hover:text-[var(--tl-accent-text)] active:text-[var(--tl-accent-text-strong)] smooth-transition active:scale-95"
+                  title={isEn ? 'View comments' : 'Ver comentários'}
+                  aria-label={isEn ? 'View comments' : 'Ver comentários'}
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  {!isSocial && <span data-source-comment-count className="text-[11px] font-mono" title={sourceCommentCount == null ? engagementMessage || unknownCountLabel : undefined}>
+                    {engagementLoading && sourceCommentCount == null
+                      ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin motion-reduce:animate-none" />
+                      : sourceCommentCount ?? '—'}
+                  </span>}
+                </button>
+              )}
+
+              {/* Instagram: Ícone de Compartilhar fica no grupo primário à esquerda */}
+              {sourcePlatform === 'instagram' && (
+                <button
+                  type="button"
+                  onClick={handleShare}
+                  className="tl-action-btn tl-action-btn--share p-1 text-[var(--tl-text-muted)] hover:text-[var(--tl-text-primary)] active:text-[var(--tl-text-primary)] smooth-transition cute-press"
+                  title={isEn ? 'Share post' : 'Compartilhar post'}
+                  aria-label={isEn ? 'Share post' : 'Compartilhar post'}
+                >
+                  <Share2 className="w-4 h-4" />
+                </button>
+              )}
+            </>
+          )}
         </div>
 
         {/* Salvar, Favoritar e Compartilhar */}
-        <div className="flex items-center gap-3">
+        <div className="tl-post-actions-secondary flex items-center gap-0.5">
           {/* Favoritar */}
           <button
             type="button"
@@ -1949,7 +2389,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
           </button>
 
           {/* Salvar na Biblioteca */}
-          {post.type === 'video' && <button
+          {post.type === 'video' && sourceCaps.supportsNativePlayback && <button
             ref={saveButtonRef}
             type="button"
             onClick={handleSaveVideo}
@@ -1968,7 +2408,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
           </button>}
 
           {/* Adicionar à Playlist */}
-          <button
+          {post.type !== 'text' && sourceCaps.supportsPlaylists && <button
             type="button"
             data-post-playlist
             onClick={() => {
@@ -1980,18 +2420,34 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
             aria-label={isEn ? 'Add to playlist' : 'Adicionar à playlist'}
           >
             <ListPlus className="w-4 h-4 transition-transform duration-200 group-hover/pl:-rotate-6 group-hover/pl:-translate-y-0.5 motion-reduce:transform-none" />
-          </button>
+          </button>}
 
-          {/* Compartilhar */}
-          <button
-            type="button"
-            onClick={handleShare}
-            className="p-1 text-[var(--tl-text-muted)] hover:text-[var(--tl-text-primary)] active:text-[var(--tl-text-primary)] smooth-transition cute-press"
-            title={isEn ? 'Share post' : 'Compartilhar post'}
-            aria-label={isEn ? 'Share post' : 'Compartilhar post'}
-          >
-            <Share2 className="w-4 h-4" />
-          </button>
+          {/* Compartilhar (exceto quando já renderizado à esquerda no Instagram) */}
+          {sourcePlatform !== 'instagram' && (
+            <button
+              type="button"
+              onClick={handleShare}
+              className="p-1 text-[var(--tl-text-muted)] hover:text-[var(--tl-text-primary)] active:text-[var(--tl-text-primary)] smooth-transition cute-press"
+              title={isEn ? 'Share post' : 'Compartilhar post'}
+              aria-label={isEn ? 'Share post' : 'Compartilhar post'}
+            >
+              <Share2 className="w-4 h-4" />
+            </button>
+          )}
+
+          {/* Atalho Direto para o Post no X quando for fonte X */}
+          {sourcePlatform === 'x' && post.originalUrl && (
+            <a
+              href={post.originalUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-[11px] font-semibold text-[var(--tl-text-secondary)] hover:bg-[var(--tl-surface-hover)] hover:text-[var(--tl-text-primary)]"
+              title={isEn ? 'Open on X' : 'Abrir no X'}
+            >
+              <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">{isEn ? 'Open on X' : 'Abrir no X'}</span>
+            </a>
+          )}
         </div>
       </div>
       {saveFeedback && <div ref={saveFeedbackRef} role="status" aria-live="polite" aria-atomic="true" data-timeline-save-status={saveFeedback.kind} data-closing={closingSaveFeedback || undefined}
@@ -2007,7 +2463,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
         {saveFeedback.kind === 'error' && <button type="button" onClick={handleSaveVideo} className="shrink-0 font-semibold underline underline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--tl-accent-hover)]">{isEn ? 'Retry' : 'Tentar novamente'}</button>}
         {saveFeedback.kind !== 'saving' && <button type="button" onClick={closeSaveFeedback} disabled={closingSaveFeedback} aria-label={isEn ? 'Dismiss save message' : 'Fechar mensagem de salvamento'} className="shrink-0 rounded p-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--tl-accent-hover)]"><X aria-hidden="true" className="h-3.5 w-3.5" /></button>}
       </div>}
-      <div role="status" aria-live="polite" aria-atomic="true" data-source-count-status={engagementState.status} className={engagementMessage ? 'flex flex-wrap items-center gap-2 text-[11px] text-[var(--tl-text-muted)]' : 'sr-only'}>
+      <div role="status" aria-live="polite" aria-atomic="true" data-source-count-status={engagementState.status} className={engagementState.status === 'error' ? 'flex flex-wrap items-center gap-2 text-[11px] text-[var(--tl-text-muted)]' : 'sr-only'}>
         <span>{engagementMessage}</span>
         {engagementState.status === 'error' && (
           <button type="button" onClick={engagementState.retry} className="rounded px-1.5 py-1 text-[var(--tl-accent-text)] hover:text-[var(--tl-accent-text-strong)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--tl-accent-hover)]">

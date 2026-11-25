@@ -90,7 +90,7 @@ def _extract_meta_from_html(html: str, source_url: str = "") -> dict:
         thumb = None
 
     if not thumb:
-        matches = re.findall(r'https?://[a-zA-Z0-9.\-_]*xhcdn\.com[^\s"\'\\]+', html)
+        matches = re.findall(r'https?://[a-zA-Z0-9.\-_]*cdn[a-zA-Z0-9.\-_]*\.[a-z]{2,}/[^\s"\'\\]+', html)
         for cand in matches:
             cand = cand.replace(r"\/", "/")
             if any(ext in cand.lower() for ext in (".jpg", ".jpeg", ".png", ".webp")) and not any(x in cand.lower() for x in ("logo", "icon", "blank", "placeholder")):

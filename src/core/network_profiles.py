@@ -221,9 +221,19 @@ def resolve_anti_hotlink_headers(
         or (effective_ref and effective_ref.startswith("local://"))
     )
 
-    ref_is_media_file = any(
-        parsed_ref.path.lower().endswith(ext)
-        for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".mp4", ".webm", ".m4v", ".mov", ".bmp"]
+    ref_is_viewer_page = bool(
+        parsed_ref
+        and (
+            "/show/" in parsed_ref.path.lower()
+            or "/view/" in parsed_ref.path.lower()
+        )
+    )
+    ref_is_media_file = (
+        not ref_is_viewer_page
+        and any(
+            parsed_ref.path.lower().endswith(ext)
+            for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".mp4", ".webm", ".m4v", ".mov", ".bmp"]
+        )
     ) if parsed_ref else False
 
     is_search_aggregator = any(
@@ -325,17 +335,14 @@ def extract_canonical_target_page(src: str) -> Optional[str]:
         if m_yt:
             return f"https://www.youtube.com/watch?v={m_yt.group(1)}"
 
-    # Provedor xHamster: /videos/...-xhXXXXX ou /movies/...
-    if "xhamster" in host or "xhcdn" in host or (isinstance(src, str) and ("xh_" in src or "-xh" in src)):
-        m_xh = re.search(r"/videos/([a-zA-Z0-9_\-]+)", src)
-        if m_xh:
-            return f"https://xhamster.com/videos/{m_xh.group(1)}"
-        m_xh_id = re.search(r"(?:^|[\-_/])(xh[a-zA-Z0-9]{4,12})(?:[?#]|$)", src)
-        if m_xh_id:
-            return f"https://xhamster.com/videos/video-{m_xh_id.group(1)}"
-        m_xh_mov = re.search(r"/movies/([a-zA-Z0-9]+)/", src)
-        if m_xh_mov:
-            return f"https://xhamster.com/movies/{m_xh_mov.group(1)}/video.html"
+    # Generic /videos/{slug} or /movies/{id}/video.html canonicalization using item's own origin
+    if origin and isinstance(src, str):
+        m_vid = re.search(r"/videos/([a-zA-Z0-9_\-]+)", src)
+        if m_vid and "/videos/" in (parsed.path or ""):
+            return f"{origin}/videos/{m_vid.group(1)}"
+        m_mov = re.search(r"/movies/([a-zA-Z0-9]+)/", src)
+        if m_mov:
+            return f"{origin}/movies/{m_mov.group(1)}/video.html"
 
     # Provedor A: viewkey / v param
     host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])

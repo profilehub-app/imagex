@@ -1,10 +1,12 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Heart } from 'lucide-react';
 import { TimelineCreator } from './timelineModel';
 import { useAppStore } from '../../../store/useAppStore';
 import { useProfileDirectoryLibraryStore } from '../../../store/useProfileDirectoryLibraryStore';
 import { useProfileAvatarStore } from '../../../store/useProfileAvatarStore';
 import { SourceAvatar } from '../common/SourceAvatar';
+
+const STORIES_BATCH_SIZE = 18;
 
 interface TimelineStoriesBarProps {
   creators: TimelineCreator[];
@@ -42,6 +44,7 @@ export const TimelineStoriesBar: React.FC<TimelineStoriesBarProps> = ({
   const favoritesSyncStatus = useProfileDirectoryLibraryStore(state => state.favoritesSyncStatus);
   const initSync = useProfileDirectoryLibraryStore(state => state.initSync);
   const seedAvatars = useProfileAvatarStore(state => state.seedAvatars);
+  const [visibleLimit, setVisibleLimit] = useState(STORIES_BATCH_SIZE);
 
   useEffect(() => {
     seedAvatars(
@@ -51,6 +54,17 @@ export const TimelineStoriesBar: React.FC<TimelineStoriesBarProps> = ({
       }))
     );
   }, [creators, seedAvatars]);
+
+  const handleTrackScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    if (el.scrollLeft + el.clientWidth >= el.scrollWidth - 160) {
+      setVisibleLimit(current => Math.min(creators.length, current + STORIES_BATCH_SIZE));
+    }
+  }, [creators.length]);
+
+  const visibleCreators = creators.length <= visibleLimit
+    ? creators
+    : creators.filter((c, idx) => idx < visibleLimit || c.id === selectedCreatorId);
 
   return (
     <div className="w-full max-w-full min-w-0 overflow-hidden bg-[var(--tl-surface)] border border-[var(--tl-border)] rounded-2xl p-3.5 shadow-xl">
@@ -70,7 +84,7 @@ export const TimelineStoriesBar: React.FC<TimelineStoriesBarProps> = ({
         </p>
       )}
 
-      <div className="flex items-center gap-3.5 overflow-x-auto py-1.5 px-2 no-scrollbar">
+      <div onScroll={handleTrackScroll} className="tl-stories-track flex items-center gap-3.5 overflow-x-auto py-1.5 px-2 no-scrollbar">
         {/* Botão Todos / Feed Geral */}
         <button
           type="button"
@@ -94,8 +108,8 @@ export const TimelineStoriesBar: React.FC<TimelineStoriesBarProps> = ({
           </span>
         </button>
 
-        {/* Círculos de Criadores */}
-        {creators.map((creator) => {
+        {/* Círculos de Criadores (Windowed para 60fps sem travar) */}
+        {visibleCreators.map((creator) => {
           const isSelected = selectedCreatorId === creator.id;
           const creatorName = creator.name?.trim() || (isEn ? 'Unknown creator' : 'Criador desconhecido');
           const hasValidAvatar = creator.avatar && !creator.avatar.startsWith('data:image/gif') && creator.avatar.length > 50;
@@ -119,7 +133,7 @@ export const TimelineStoriesBar: React.FC<TimelineStoriesBarProps> = ({
                   src={hasValidAvatar ? creator.avatar : null}
                   profileUrl={creator.profileUrl}
                   referer={creator.profileUrl}
-                  hydrate={!hasValidAvatar && Boolean(creator.profileUrl)}
+                  lazyHydrate={!hasValidAvatar && Boolean(creator.profileUrl)}
                   alt={creatorName}
                   className="w-full h-full rounded-full object-cover bg-[var(--tl-surface)]"
                 />

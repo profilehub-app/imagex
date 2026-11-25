@@ -10,6 +10,7 @@ import {
   TimelinePlaylist,
   TimelineVideoQuality,
   TimelineSourceIdentityHint,
+  doesPostMatchCreator,
   hasKnownExactPublicationDate,
   mapScanResponseToTimelinePosts,
   mergeRefreshedTimelinePosts,
@@ -23,6 +24,31 @@ import {
   upgradePhotoUrlFast,
 } from '../components/profile-hub/timeline/timelineModel';
 import { discoverRecentProfileRoot, fetchAlbumPhotos } from '../services/profileHubApi';
+import {
+  enrichCatalogBatch,
+  fetchBrowseSources,
+  fetchForumBoards,
+  fetchForumThreadPage,
+  fetchIntegratedSourcesApi,
+  fetchTimelineBrowsePage,
+  fetchTimelineDirectory,
+  integrateTimelineUrlApi,
+  removeIntegratedSourceApi,
+  resetIntegratedSourcesApi,
+  type BrowseSubfilterOption,
+  type ForumBoardSection,
+  type ForumThreadViewResponse,
+  type TimelineBrowseFeedSlice,
+  type TimelineBrowseSourceCapability,
+  type TimelineDirectoryItem,
+} from '../services/timelineBrowse';
+import type {
+  IntegratedSourceRecord,
+  IntegratedSourcesStatus,
+  IntegrateUrlResult,
+} from '../components/profile-hub/timeline/timelineOptIn';
+import { loadTimelineCreatorProfile } from '../services/timelineCreatorProfile';
+import { registerDynamicOrigin } from '../components/profile-hub/timeline/timelineSourceCapabilities';
 import { useAppStore } from './useAppStore';
 import { readTimelineCatalog, writeTimelineCatalog, catalogSnapshot } from '../services/timelineCatalogCache';
 import {useProfileDirectoryLibraryStore} from './useProfileDirectoryLibraryStore';
@@ -34,7 +60,48 @@ import {
 import {projectSavedTimelineCreators} from '../services/timelineSavedCreators';
 import {engagementSourceUrl} from '../services/profileHubEngagement';
 
-const albumPhotosMemoryCache = new Map<string, TimelinePhotoItem[]>();
+interface CachedAlbumState {
+  items: TimelinePhotoItem[];
+  page: number;
+  totalPages: number;
+  hasMore: boolean;
+  nextPageUrl: string | null;
+  complete: boolean;
+}
+const albumPhotosMemoryCache = new Map<string, CachedAlbumState>();
+const browseControllers = new Map<string, AbortController>();
+const browseLoadMoreControllers = new Map<string, AbortController>();
+const enrichedCatalogUrls = new Set<string>();
+const enrichingCatalogUrls = new Set<string>();
+let threadViewController: AbortController | undefined;
+let profileLoadMoreController: AbortController | undefined;
+
+const MAX_ALBUM_CACHE_ENTRIES = 200;
+const MAX_ENRICHED_URL_SET = 500;
+
+function setAlbumPhotosMemoryCache(key: string, value: CachedAlbumState): void {
+  if (albumPhotosMemoryCache.has(key)) {
+    albumPhotosMemoryCache.delete(key);
+  }
+  albumPhotosMemoryCache.set(key, value);
+  while (albumPhotosMemoryCache.size > MAX_ALBUM_CACHE_ENTRIES) {
+    const oldest = albumPhotosMemoryCache.keys().next().value;
+    if (!oldest) break;
+    albumPhotosMemoryCache.delete(oldest);
+  }
+}
+
+function rememberEnrichedUrl(url: string): void {
+  if (enrichedCatalogUrls.has(url)) {
+    enrichedCatalogUrls.delete(url);
+  }
+  enrichedCatalogUrls.add(url);
+  while (enrichedCatalogUrls.size > MAX_ENRICHED_URL_SET) {
+    const oldest = enrichedCatalogUrls.values().next().value;
+    if (!oldest) break;
+    enrichedCatalogUrls.delete(oldest);
+  }
+}
 // Each opening owns its completion, including reopening the same album.
 let lightboxRequestVersion = 0;
 let lightboxAlbumController: AbortController | undefined;
@@ -50,6 +117,31 @@ export interface CreatorWatchReturnTarget {
   watchSession: TimelineWatchSession | null;
   playlistId: string | null;
   preferDesktopPreview?: boolean;
+}
+
+export interface TimelineDirectorySlice {
+  items: TimelineDirectoryItem[];
+  page: number;
+  hasMore: boolean;
+  nextPage: number | null;
+  nextPageUrl?: string | null;
+  isLoading: boolean;
+  error: string | null;
+}
+
+export interface TimelineForumBoardsSlice {
+  sections: ForumBoardSection[];
+  isLoading: boolean;
+  error: string | null;
+}
+
+export interface TimelineActiveThreadState {
+  threadUrl: string;
+  title: string;
+  source?: string;
+  isLoading: boolean;
+  data: ForumThreadViewResponse | null;
+  error: string | null;
 }
 
 interface ProfileTimelineState {
@@ -72,6 +164,17 @@ interface ProfileTimelineState {
 
   activeCommentsPostId: string | null;
   lightbox: TimelineLightboxState;
+  browseCapabilities: Record<string, TimelineBrowseSourceCapability>;
+  browseFeedsBySource: Record<string, TimelineBrowseFeedSlice>;
+  dynamicSubfiltersBySource: Record<string, BrowseSubfilterOption[]>;
+  directoriesByKey: Record<string, TimelineDirectorySlice>;
+  forumBoardsBySource: Record<string, TimelineForumBoardsSlice>;
+  activeThreadView: TimelineActiveThreadState | null;
+  isLoadingMoreProfile: boolean;
+  integratedSources: IntegratedSourceRecord[];
+  integratedSourcesStatus: IntegratedSourcesStatus;
+  isIntegratingSource: boolean;
+  lastIntegrationResult: IntegrateUrlResult | null;
 
   likedPostIds: Record<string, boolean>;
   savedPostIds: Record<string, boolean>;
@@ -87,7 +190,12 @@ interface ProfileTimelineState {
   setSelectedCreatorId: (creatorId: string | null) => void;
   setActiveProfileTab: (tab: string) => void;
   setActiveAutoplayPostId: (postId: string | null) => void;
-  discoverCreatorCatalog: (creatorId: string, signal?: AbortSignal, streamFull?: boolean) => Promise<void>;
+  discoverCreatorCatalog: (
+    creatorId: string,
+    signal?: AbortSignal,
+    streamFull?: boolean,
+    options?: { sort?: string; force?: boolean }
+  ) => Promise<void>;
   refreshTimeline: (signal?: AbortSignal) => Promise<void>;
   refreshMissingCreators: (creatorIds: string[], signal?: AbortSignal) => Promise<void>;
   suspendRequests: () => void;
@@ -125,6 +233,7 @@ interface ProfileTimelineState {
       height?: number;
       fileSizeBytes?: number;
       format?: string;
+      requiresProxy?: boolean;
     }
   ) => void;
   updatePostStream: (
@@ -138,6 +247,36 @@ interface ProfileTimelineState {
   closeLightbox: () => void;
   nextLightboxImage: () => void;
   prevLightboxImage: () => void;
+  loadNextAlbumPage: () => Promise<void>;
+  hydrateBrowseCapabilities: (force?: boolean) => Promise<void>;
+  loadIntegratedSources: () => Promise<void>;
+  integrateSourceUrl: (rawUrl: string) => Promise<IntegrateUrlResult>;
+  removeIntegratedSource: (sourceId: string) => Promise<void>;
+  resetIntegratedSources: () => Promise<void>;
+  clearLastIntegrationResult: () => void;
+  loadBrowseFeed: (
+    source: string,
+    category?: string,
+    subfilter?: string | null,
+    reset?: boolean
+  ) => Promise<void>;
+  loadMoreBrowseFeed: (source: string) => Promise<void>;
+  loadDirectory: (source: string, kind: string, page?: number, append?: boolean) => Promise<void>;
+  queueCatalogEnrichment: (items: Array<{ url: string; source: string }>) => Promise<void>;
+  loadForumBoards: (source: string) => Promise<void>;
+  openThreadView: (postOrUrl: TimelinePost | string, title?: string, source?: string) => Promise<void>;
+  loadThreadPage: (pageOrUrl: number | string) => Promise<void>;
+  closeThreadView: () => void;
+  loadMoreCreatorProfileAlbums: (
+    creatorId: string,
+    creatorOverride?: TimelineCreator,
+    existingPostsOverride?: TimelinePost[]
+  ) => Promise<{ creator: TimelineCreator; posts: TimelinePost[] } | null>;
+  switchCreatorProfileSort: (
+    creatorId: string,
+    sort: string,
+    creatorOverride?: TimelineCreator
+  ) => Promise<{ creator: TimelineCreator; posts: TimelinePost[] } | null>;
   toggleGlobalMute: () => void;
 }
 
@@ -253,6 +392,24 @@ function reconcileLibraryInteractions(previousLikedKeys?: Set<string>, previousF
   }
 }
 
+function prioritizeCreatorsForDiscovery(creators: TimelineCreator[]): Array<{ id: string; url: string }> {
+  // Prioritize lightweight social feeds first before heavier remote catalog scans.
+  const priorityOrder: Record<string, number> = {
+    youtube: 0,
+    x: 1,
+    pinterest: 2,
+    imgur: 3,
+    generic: 9,
+  };
+  return [...creators]
+    .sort((a, b) => {
+      const siteA = resolveTimelinePlatform(a.profileUrl, a.site) || 'generic';
+      const siteB = resolveTimelinePlatform(b.profileUrl, b.site) || 'generic';
+      return (priorityOrder[siteA] ?? 9) - (priorityOrder[siteB] ?? 9);
+    })
+    .map((creator) => ({ id: creator.id, url: creator.profileUrl }));
+}
+
 function subscribeToLibraryStore() {
   if (timelineLibrarySubscribed) return;
   timelineLibrarySubscribed = true;
@@ -268,9 +425,14 @@ function subscribeToLibraryStore() {
       );
     }
   });
+  let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
   useProfileTimelineStore.subscribe((state, previous) => {
     if (state.posts !== previous.posts) {
-      reconcileLibraryInteractions();
+      if (reconcileTimer !== null) clearTimeout(reconcileTimer);
+      reconcileTimer = setTimeout(() => {
+        reconcileTimer = null;
+        reconcileLibraryInteractions();
+      }, 600);
     }
   });
 }
@@ -302,7 +464,23 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
     title: '',
     albumUrl: undefined,
     isLoadingAlbum: false,
+    albumPage: 1,
+    albumTotalPages: 1,
+    albumHasMore: false,
+    albumNextPageUrl: null,
+    isLoadingMoreAlbumPages: false,
   },
+  browseCapabilities: {},
+  browseFeedsBySource: {},
+  dynamicSubfiltersBySource: {},
+  directoriesByKey: {},
+  forumBoardsBySource: {},
+  activeThreadView: null,
+  isLoadingMoreProfile: false,
+  integratedSources: [],
+  integratedSourcesStatus: 'idle',
+  isIntegratingSource: false,
+  lastIntegrationResult: null,
 
   likedPostIds: initialInteractions.liked || {},
   savedPostIds: initialInteractions.saved || {},
@@ -367,6 +545,7 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
       await Promise.all([
         useProfileDirectoryLibraryStore.getState().initSync(),
         useProfileHubLibraryStore.getState().hydrateLibrary(),
+        get().loadIntegratedSources(),
       ]);
       reconcileSavedCreators();
       reconcileLibraryInteractions();
@@ -405,13 +584,75 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
 
   setActiveAutoplayPostId: (postId) => set({ activeAutoplayPostId: postId }),
 
-  discoverCreatorCatalog: async (creatorId: string, parentSignal?: AbortSignal, streamFull = false) => {
+  discoverCreatorCatalog: async (
+    creatorId: string,
+    parentSignal?: AbortSignal,
+    streamFull = false,
+    options?: { sort?: string; force?: boolean }
+  ) => {
     const state = get();
-    if (parentSignal?.aborted || state.isDiscoveringCreator[creatorId]) {
+    if (parentSignal?.aborted || (state.isDiscoveringCreator[creatorId] && !options?.force)) {
       return;
     }
     const creator = state.creators.find((c) => c.id === creatorId) || state.creatorProfiles[creatorId];
     if (!creator || !creator.profileUrl || !creator.profileUrl.startsWith('http')) {
+      return;
+    }
+    const creatorSite = resolveTimelinePlatform(creator.profileUrl, creator.site);
+    // Live-connector social networks (X, Instagram, Pinterest, Imgur, Slack) do not use
+    // the video-catalog /api/profile-hub/recent endpoint. Refresh X profiles via x-profile-info
+    // and mark other social profiles checked cleanly without triggering false 422 warnings.
+    if (creatorSite && ['x', 'instagram', 'pinterest', 'imgur', 'slack'].includes(creatorSite)) {
+      if (creatorSite === 'x') {
+        const handleMatch = creator.profileUrl.match(/(?:x|twitter)\.com\/([A-Za-z0-9_]{1,20})/i);
+        const handle = handleMatch?.[1] || (creator.handle || '').replace(/^@/, '');
+        if (handle) {
+          try {
+            const resp = await fetch(`/api/profile-hub/timeline/x-profile-info?handle=${encodeURIComponent(handle)}`, {
+              signal: parentSignal,
+            });
+            if (resp.ok && !parentSignal?.aborted) {
+              const data = await resp.json();
+              const prof = data?.profile;
+              if (prof) {
+                set((s) => {
+                  const updateCreator = (c: TimelineCreator): TimelineCreator => ({
+                    ...c,
+                    name: prof.name || c.name,
+                    handle: prof.handle || c.handle,
+                    avatar: prof.avatar || c.avatar,
+                    banner: prof.banner || c.banner,
+                    bio: prof.bio || c.bio,
+                    verified: Boolean(prof.verified ?? c.verified),
+                    stats: {
+                      ...c.stats,
+                      ...(prof.followers != null ? { followers: String(prof.followers) } : {}),
+                      ...(prof.postsCount != null ? { posts: prof.postsCount } : {}),
+                    },
+                  });
+                  const updatedCreators = s.creators.map((c) => (c.id === creatorId ? updateCreator(c) : c));
+                  const existing = s.creatorProfiles[creatorId] || creator;
+                  return {
+                    creators: updatedCreators,
+                    creatorProfiles: { ...s.creatorProfiles, [creatorId]: updateCreator(existing) },
+                    creatorRefreshErrors: { ...s.creatorRefreshErrors, [creatorId]: false },
+                    creatorRefreshedAt: { ...s.creatorRefreshedAt, [creatorId]: Date.now() },
+                    discoveredCreatorIds: { ...s.discoveredCreatorIds, [creatorId]: true },
+                  };
+                });
+                return;
+              }
+            }
+          } catch {
+            // Keep cached X profile metadata intact
+          }
+        }
+      }
+      set((s) => ({
+        creatorRefreshErrors: { ...s.creatorRefreshErrors, [creatorId]: false },
+        creatorRefreshedAt: { ...s.creatorRefreshedAt, [creatorId]: Date.now() },
+        discoveredCreatorIds: { ...s.discoveredCreatorIds, [creatorId]: true },
+      }));
       return;
     }
     const controller = new AbortController();
@@ -451,17 +692,74 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
           targetCreator.profileUrl,
           (typeof hero?.site === 'string' ? hero.site : undefined) || targetCreator.site
         ) || targetCreator.site;
+        if (nextSite && targetCreator.profileUrl) {
+          registerDynamicOrigin(targetCreator.profileUrl, nextSite);
+        }
         const nextStats = mergeTimelineCreatorStats(targetCreator.stats, hero?.stats, hero?.bio_details);
+        const nextEntityKind = (hero?.entityKind || scanData?.entityKind || targetCreator.entityKind) as TimelineCreator['entityKind'];
+        const nextBanner = (typeof hero?.bannerUrl === 'string' && hero.bannerUrl.trim())
+          || (typeof scanData?.bannerUrl === 'string' && scanData.bannerUrl.trim())
+          || targetCreator.banner;
+        const nextPortalInfo = (hero?.portalInfo && typeof hero.portalInfo === 'object' ? hero.portalInfo : undefined)
+          || (scanData?.portalInfo && typeof scanData.portalInfo === 'object' ? scanData.portalInfo : undefined)
+          || targetCreator.portalInfo;
+        const nextPerformers = Array.isArray(scanData?.featuredPerformers)
+          ? scanData.featuredPerformers.filter((r: any) => r && typeof r.name === 'string')
+          : Array.isArray(hero?.featuredPerformers)
+            ? hero.featuredPerformers.filter((r: any) => r && typeof r.name === 'string')
+            : targetCreator.featuredPerformers;
+        const nextAffiliated = Array.isArray(scanData?.affiliatedChannels)
+          ? scanData.affiliatedChannels.filter((r: any) => r && typeof r.name === 'string')
+          : Array.isArray(hero?.affiliatedChannels)
+            ? hero.affiliatedChannels.filter((r: any) => r && typeof r.name === 'string')
+            : targetCreator.affiliatedChannels;
+        const nextInterests = Array.isArray(scanData?.interests)
+          ? scanData.interests.filter((r: any) => r && typeof r.name === 'string')
+          : Array.isArray(hero?.interests)
+            ? hero.interests.filter((r: any) => r && typeof r.name === 'string')
+            : targetCreator.interests;
+        const rawSupportsSort = Array.isArray(scanData?.supportsSort)
+          ? scanData.supportsSort
+          : Array.isArray(hero?.supportsSort)
+            ? hero.supportsSort
+            : undefined;
+        const nextSupportsSort = rawSupportsSort
+          ? rawSupportsSort.filter((v: any) => typeof v === 'string' && v.trim())
+          : targetCreator.supportsSort;
+        const nextActiveSort = options?.sort
+          || (typeof scanData?.activeSort === 'string' && scanData.activeSort.trim() ? scanData.activeSort.trim() : undefined)
+          || (typeof hero?.activeSort === 'string' && hero.activeSort.trim() ? hero.activeSort.trim() : undefined)
+          || targetCreator.activeSort;
+        const rawRelated = Array.isArray(scanData?.relatedEntities)
+          ? scanData.relatedEntities
+          : Array.isArray(hero?.relatedEntities)
+            ? hero.relatedEntities
+            : undefined;
+        const nextRelated = rawRelated
+          ? rawRelated.filter((r: any) => r && typeof r.name === 'string')
+          : targetCreator.relatedEntities;
 
         const refreshedCreator: TimelineCreator = {
           ...targetCreator,
           name: nextName,
           avatar: nextAvatar,
+          banner: nextBanner,
           handle: nextHandle || targetCreator.handle,
           site: nextSite,
+          entityKind: nextEntityKind,
           verified: nextVerified,
           stats: nextStats,
           bio: nextBio,
+          relatedEntities: nextRelated,
+          portalInfo: nextPortalInfo,
+          featuredPerformers: nextPerformers,
+          affiliatedChannels: nextAffiliated,
+          interests: nextInterests,
+          supportsSort: nextSupportsSort,
+          activeSort: nextActiveSort,
+          profilePage: typeof scanData?.page === 'number' ? scanData.page : targetCreator.profilePage,
+          profileHasMore: typeof scanData?.hasMore === 'boolean' ? scanData.hasMore : targetCreator.profileHasMore,
+          profileNextPage: typeof scanData?.nextPage === 'number' || scanData?.nextPage === null ? scanData.nextPage : targetCreator.profileNextPage,
         };
 
         const mergedCreatorPosts = mapScanResponseToTimelinePosts(
@@ -481,11 +779,20 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
                 ...c,
                 name: refreshedCreator.name,
                 avatar: refreshedCreator.avatar,
+                banner: refreshedCreator.banner,
                 handle: refreshedCreator.handle,
                 site: refreshedCreator.site,
+                entityKind: refreshedCreator.entityKind,
                 verified: refreshedCreator.verified,
                 bio: refreshedCreator.bio,
                 playlists: updatedPlaylists,
+                relatedEntities: refreshedCreator.relatedEntities,
+                portalInfo: refreshedCreator.portalInfo,
+                featuredPerformers: refreshedCreator.featuredPerformers,
+                affiliatedChannels: refreshedCreator.affiliatedChannels,
+                interests: refreshedCreator.interests,
+                supportsSort: refreshedCreator.supportsSort,
+                activeSort: refreshedCreator.activeSort,
                 // Loaded tabs count their own items. Partial discovery cannot
                 // replace source-reported totals or turn an unknown into zero.
                 stats: mergeTimelineCreatorStats(c.stats, hero?.stats, hero?.bio_details),
@@ -529,8 +836,26 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
         knownDates,
         knownMedia,
         streamFull ? (snapshot) => applyScanResult(snapshot) : undefined,
+        undefined,
+        options?.sort,
       );
       applyScanResult(finalScan);
+      if (!signal?.aborted) {
+        const latestCreator = get().creatorProfiles[creatorId] || get().creators.find((c) => c.id === creatorId);
+        if (latestCreator?.profileUrl) {
+          useProfileDirectoryLibraryStore.getState().updateFavoriteMetadata?.({
+            kind: 'profile',
+            url: latestCreator.profileUrl,
+            name: latestCreator.name,
+            imageUrl: latestCreator.avatar || null,
+            bannerUrl: latestCreator.banner,
+            entityKind: latestCreator.entityKind,
+            source: latestCreator.site,
+            verified: latestCreator.verified,
+            portalInfo: latestCreator.portalInfo,
+          });
+        }
+      }
       if (signal?.aborted) {
         set(s => ({isDiscoveringCreator:{...s.isDiscoveringCreator,[creatorId]:false}}));
         return;
@@ -565,6 +890,10 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
 
   suspendRequests: () => {
     for (const controller of creatorCatalogControllers.values()) controller.abort();
+    for (const controller of browseControllers.values()) controller.abort();
+    for (const controller of browseLoadMoreControllers.values()) controller.abort();
+    threadViewController?.abort();
+    profileLoadMoreController?.abort();
     lightboxAlbumController?.abort();
     lightboxAlbumController = undefined;
     lightboxRequestVersion++;
@@ -575,7 +904,7 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
     if (signal?.aborted || creatorIds.length === 0) return;
     await get().loadTimelineData();
     const targetSet = new Set(creatorIds);
-    const creators = get().creators.filter(creator => targetSet.has(creator.id)).map(creator => ({ id: creator.id, url: creator.profileUrl }));
+    const creators = prioritizeCreatorsForDiscovery(get().creators.filter(creator => targetSet.has(creator.id)));
     for (const creator of creators) {
       if (signal?.aborted) return;
       if (get().creators.some(current => current.id === creator.id && current.profileUrl === creator.url)) {
@@ -587,9 +916,8 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
   refreshTimeline: async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
     await get().loadTimelineData();
-    // Serial source discovery bounds network pressure without imposing a
-    // business limit on the number of creators in a user's feed.
-    const creators = get().creators.map(creator => ({ id: creator.id, url: creator.profileUrl }));
+    // Prioritize social/YouTube creators first so YouTube/Instagram tabs are populated immediately.
+    const creators = prioritizeCreatorsForDiscovery(get().creators);
     for (const creator of creators) {
       if (signal?.aborted) return;
       if (get().creators.some(current => current.id === creator.id && current.profileUrl === creator.url)) {
@@ -674,13 +1002,34 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
     const creator=typeof input==='string' ? get().creators.find(item=>item.id===input) || get().creatorProfiles[input] : input;
     if(!creator || !engagementSourceUrl(creator.profileUrl)) return false;
     subscribeToSavedCreators();
-    set(state=>({creatorProfiles:{...state.creatorProfiles,[creator.id]:creator}}));
+    const state = get();
+    const currentlyFollowed = Boolean(
+      state.followedCreatorIds[creator.id] ||
+      state.creators.some(c => c.id === creator.id || c.profileUrl?.toLowerCase() === creator.profileUrl.toLowerCase())
+    );
+    const nextFollowed = { ...state.followedCreatorIds };
+    if (currentlyFollowed) {
+      delete nextFollowed[creator.id];
+    } else {
+      nextFollowed[creator.id] = true;
+    }
+    persistInteractions({
+      liked: state.likedPostIds,
+      saved: state.savedPostIds,
+      favorited: state.favoritedPostIds,
+      followed: nextFollowed,
+      userComments: state.userComments,
+    });
+    set(s=>({
+      followedCreatorIds: nextFollowed,
+      creatorProfiles:{...s.creatorProfiles,[creator.id]:creator},
+    }));
     const accepted=useProfileDirectoryLibraryStore.getState().toggleFavorite({kind:'profile',url:creator.profileUrl,name:creator.name || null,imageUrl:creator.avatar || null});
     if(accepted && timelineHasBootstrapped) {
       const current=get();
       void writeTimelineCatalog(catalogSnapshot({...current,creators:Object.values(current.creatorProfiles)},timelineIdentityHints,current.creatorRefreshedAt));
     }
-    return accepted;
+    return true;
   },
 
   openComments: (postId) => set({ activeCommentsPostId: postId }),
@@ -724,7 +1073,8 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
     lightboxAlbumController = undefined;
     const requestVersion = ++lightboxRequestVersion;
     const ownsLightbox = () => requestVersion === lightboxRequestVersion;
-    const cachedItems = albumUrl ? albumPhotosMemoryCache.get(albumUrl) : undefined;
+    const cachedEntry = albumUrl ? albumPhotosMemoryCache.get(albumUrl) : undefined;
+    const cachedItems = cachedEntry?.items;
     let baseItems = items;
     let baseImages = images;
 
@@ -760,7 +1110,7 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
     }
     const expectedCount = expectedPhotoCount || matchingPost?.photoCount || creatorAlbumCount || 0;
     const hasCachedFullAlbum = Boolean(
-      cachedItems && cachedItems.length >= Math.max(expectedCount, 5)
+      cachedEntry && (cachedEntry.complete || cachedEntry.items.length >= Math.max(expectedCount, 5))
     );
 
     const hasEnoughLocalPhotos =
@@ -769,7 +1119,14 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
       !(cleanImages.length >= 2 && cleanImages[0] === cleanImages[1]);
 
     if (hasEnoughLocalPhotos && albumUrl && !albumPhotosMemoryCache.has(albumUrl)) {
-      albumPhotosMemoryCache.set(albumUrl, initialItems);
+      setAlbumPhotosMemoryCache(albumUrl, {
+        items: initialItems,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        nextPageUrl: null,
+        complete: true,
+      });
     }
 
     const needsRemoteAlbumFetch = Boolean(
@@ -792,6 +1149,11 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
         title,
         albumUrl,
         isLoadingAlbum: needsRemoteAlbumFetch,
+        albumPage: cachedEntry?.page ?? 1,
+        albumTotalPages: cachedEntry?.totalPages ?? 1,
+        albumHasMore: cachedEntry?.hasMore ?? false,
+        albumNextPageUrl: cachedEntry?.nextPageUrl ?? null,
+        isLoadingMoreAlbumPages: false,
       },
     });
 
@@ -827,9 +1189,19 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
             };
           });
           const fetchedUrls = fetchedItems.map((it) => it.url);
+          const pageNum = res.page ?? 1;
+          const totalPgs = res.totalPages ?? 1;
+          const hasMore = Boolean(res.hasMore);
+          const nextPageUrl = res.nextPageUrl ?? null;
 
-          // A loaded page is not proof of a complete album.
-          if (res.metadata.paginationComplete === true) albumPhotosMemoryCache.set(albumUrl, fetchedItems);
+          setAlbumPhotosMemoryCache(albumUrl, {
+            items: fetchedItems,
+            page: pageNum,
+            totalPages: totalPgs,
+            hasMore,
+            nextPageUrl,
+            complete: res.metadata.paginationComplete === true && !hasMore,
+          });
 
           set((s) => {
             const updatedPosts = s.posts.map((post) =>
@@ -886,6 +1258,11 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
                 items: fetchedItems,
                 currentIndex: Math.min(s.lightbox.currentIndex, Math.max(0, fetchedUrls.length - 1)),
                 isLoadingAlbum: false,
+                albumPage: pageNum,
+                albumTotalPages: totalPgs,
+                albumHasMore: hasMore,
+                albumNextPageUrl: nextPageUrl,
+                isLoadingMoreAlbumPages: false,
               },
             };
           });
@@ -899,6 +1276,372 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
         .finally(() => {
           if (lightboxAlbumController === controller) lightboxAlbumController = undefined;
         });
+    }
+  },
+
+  loadNextAlbumPage: async () => {
+    const lb = get().lightbox;
+    const albumUrl = lb.albumUrl;
+    if (!lb.isOpen || !albumUrl || !lb.albumHasMore || lb.isLoadingMoreAlbumPages || lb.isLoadingAlbum) {
+      return;
+    }
+    const nextPage = (lb.albumPage || 1) + 1;
+    const nextPageUrl = lb.albumNextPageUrl || null;
+    set((s) => ({
+      lightbox: { ...s.lightbox, isLoadingMoreAlbumPages: true },
+    }));
+    try {
+      const res = await fetchAlbumPhotos(albumUrl, undefined, nextPage, { pageUrl: nextPageUrl });
+      const incomingItems: TimelinePhotoItem[] = (res.photos || []).map((p) => {
+        const rawUrl = p.originalUrl || p.thumbnailUrl;
+        const upUrl = upgradePhotoUrlFast(rawUrl);
+        return {
+          id: p.id,
+          url: upUrl,
+          thumbnailUrl: p.thumbnailUrl || rawUrl,
+          pageUrl: p.pageUrl,
+          sourcePage: p.sourcePage || albumUrl,
+          width: p.width,
+          height: p.height,
+          fileSizeBytes: p.fileSizeBytes,
+          format: p.format,
+          isResolvedOriginal: p.isResolvedOriginal,
+          isAnimated: p.type === 'gif' || (p as any).isAnimated,
+        };
+      });
+      set((s) => {
+        if (!s.lightbox.isOpen || s.lightbox.albumUrl !== albumUrl) return s;
+        const currentItems = s.lightbox.items || [];
+        const seenKeys = new Set(
+          currentItems.map((it) => it.id || it.pageUrl || it.thumbnailUrl || it.url)
+        );
+        const appendedItems = [...currentItems];
+        for (const item of incomingItems) {
+          const key = item.id || item.pageUrl || item.thumbnailUrl || item.url;
+          if (key && !seenKeys.has(key)) {
+            seenKeys.add(key);
+            appendedItems.push(item);
+          }
+        }
+        const appendedUrls = appendedItems.map((it) => it.url);
+        const resolvedPage = res.page ?? nextPage;
+        const resolvedTotal = Math.max(res.totalPages ?? s.lightbox.albumTotalPages ?? resolvedPage, resolvedPage);
+        const hasMore = Boolean(res.hasMore);
+        const updatedNextUrl = res.nextPageUrl ?? null;
+
+        setAlbumPhotosMemoryCache(albumUrl, {
+          items: appendedItems,
+          page: resolvedPage,
+          totalPages: resolvedTotal,
+          hasMore,
+          nextPageUrl: updatedNextUrl,
+          complete: !hasMore,
+        });
+
+        return {
+          lightbox: {
+            ...s.lightbox,
+            images: appendedUrls,
+            items: appendedItems,
+            albumPage: resolvedPage,
+            albumTotalPages: resolvedTotal,
+            albumHasMore: hasMore,
+            albumNextPageUrl: updatedNextUrl,
+            isLoadingMoreAlbumPages: false,
+          },
+        };
+      });
+    } catch {
+      set((s) => ({
+        lightbox: { ...s.lightbox, isLoadingMoreAlbumPages: false },
+      }));
+    }
+  },
+
+  hydrateBrowseCapabilities: async (force = false) => {
+    if (!force && Object.keys(get().browseCapabilities).length > 0) return;
+    try {
+      const caps = await fetchBrowseSources();
+      const map: Record<string, TimelineBrowseSourceCapability> = {};
+      for (const c of caps) {
+        if (c?.source_id) map[c.source_id] = c;
+      }
+      set({ browseCapabilities: map });
+    } catch {
+      // Ignore offline error; capabilities remain lazy
+    }
+  },
+
+  loadIntegratedSources: async () => {
+    set({ integratedSourcesStatus: 'loading' });
+    try {
+      const res = await fetchIntegratedSourcesApi();
+      set({
+        integratedSources: Array.isArray(res.sources) ? res.sources : [],
+        integratedSourcesStatus: 'loaded',
+      });
+    } catch {
+      set({ integratedSourcesStatus: 'unavailable' });
+    }
+  },
+
+  integrateSourceUrl: async (rawUrl) => {
+    set({ isIntegratingSource: true });
+    try {
+      const data = await integrateTimelineUrlApi(rawUrl);
+      const sources: IntegratedSourceRecord[] = Array.isArray(data?.sources) ? data.sources : get().integratedSources;
+      const result: IntegrateUrlResult = {
+        ok: Boolean(data?.ok),
+        matched: Boolean(data?.matched),
+        supported: Boolean(data?.supported),
+        reason: typeof data?.reason === 'string' ? data.reason : undefined,
+        host: typeof data?.host === 'string' ? data.host : undefined,
+        integration: data?.integration,
+        sources,
+        targetProfileUrl:
+          data?.ok && data?.integration?.level === 'profile'
+            ? String(data.integration.targetUrl || rawUrl)
+            : null,
+      };
+      set({
+        integratedSources: sources,
+        integratedSourcesStatus: 'loaded',
+        isIntegratingSource: false,
+        lastIntegrationResult: result,
+      });
+      if (result.ok) {
+        await get().hydrateBrowseCapabilities(true);
+      }
+      return result;
+    } catch {
+      const failResult: IntegrateUrlResult = {
+        ok: false,
+        matched: false,
+        supported: false,
+        reason: 'network_error',
+        sources: get().integratedSources,
+      };
+      set({
+        isIntegratingSource: false,
+        lastIntegrationResult: failResult,
+      });
+      return failResult;
+    }
+  },
+
+  removeIntegratedSource: async (sourceId) => {
+    try {
+      const data = await removeIntegratedSourceApi(sourceId);
+      const sources: IntegratedSourceRecord[] = Array.isArray(data?.sources) ? data.sources : [];
+      const sid = String(sourceId || '').trim().toLowerCase();
+      set((s) => {
+        const nextFeeds = { ...s.browseFeedsBySource };
+        delete nextFeeds[sid];
+        return {
+          integratedSources: sources,
+          integratedSourcesStatus: 'loaded',
+          browseFeedsBySource: nextFeeds,
+          lastIntegrationResult: null,
+        };
+      });
+      await get().hydrateBrowseCapabilities(true);
+    } catch {
+      // keep existing state on transient HTTP error
+    }
+  },
+
+  resetIntegratedSources: async () => {
+    try {
+      await resetIntegratedSourcesApi();
+      set({
+        integratedSources: [],
+        integratedSourcesStatus: 'loaded',
+        browseFeedsBySource: {},
+        dynamicSubfiltersBySource: {},
+        browseCapabilities: {},
+        lastIntegrationResult: null,
+      });
+    } catch {
+      // ignore transient error
+    }
+  },
+
+  clearLastIntegrationResult: () => set({ lastIntegrationResult: null }),
+
+  loadBrowseFeed: async (source, category, subfilter = null, reset = false) => {
+    const sid = String(source || '').trim().toLowerCase();
+    if (!sid) return;
+    const existing = get().browseFeedsBySource[sid];
+    const targetCategory = category || existing?.category || get().browseCapabilities[sid]?.default_category || 'popular';
+    const targetSubfilter = subfilter !== undefined ? subfilter : (existing?.subfilter ?? null);
+    if (
+      !reset &&
+      existing &&
+      existing.category === targetCategory &&
+      existing.subfilter === targetSubfilter &&
+      (existing.isLoading || (existing.items.length > 0 && !existing.error))
+    ) {
+      return;
+    }
+
+    browseControllers.get(sid)?.abort();
+    browseLoadMoreControllers.get(sid)?.abort();
+    const controller = new AbortController();
+    browseControllers.set(sid, controller);
+
+    set((s) => ({
+      browseFeedsBySource: {
+        ...s.browseFeedsBySource,
+        [sid]: {
+          items: reset ? [] : (existing?.items || []),
+          profiles: existing?.profiles || [],
+          category: targetCategory,
+          subfilter: targetSubfilter,
+          cursor: null,
+          hasMore: false,
+          isLoading: true,
+          isLoadingMore: false,
+          error: null,
+          resolvedOrigin: existing?.resolvedOrigin ?? null,
+        },
+      },
+    }));
+
+    try {
+      const res = await fetchTimelineBrowsePage({
+        source: sid,
+        category: targetCategory,
+        subfilter: targetSubfilter,
+        cursor: null,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      const incomingDynamicSubs = Array.isArray(res.dynamicSubfilters) && res.dynamicSubfilters.length > 0
+        ? res.dynamicSubfilters
+        : undefined;
+      set((s) => ({
+        dynamicSubfiltersBySource: incomingDynamicSubs
+          ? { ...s.dynamicSubfiltersBySource, [sid]: incomingDynamicSubs }
+          : s.dynamicSubfiltersBySource,
+        browseFeedsBySource: {
+          ...s.browseFeedsBySource,
+          [sid]: {
+            items: res.items,
+            profiles: res.profiles,
+            dynamicSubfilters: incomingDynamicSubs || s.dynamicSubfiltersBySource[sid] || existing?.dynamicSubfilters,
+            category: res.category,
+            subfilter: res.subfilter ?? null,
+            cursor: res.nextCursor,
+            hasMore: res.hasMore,
+            isLoading: false,
+            isLoadingMore: false,
+            error: res.error ?? null,
+            resolvedOrigin: res.resolvedOrigin ?? null,
+          },
+        },
+      }));
+    } catch (err: any) {
+      if (controller.signal.aborted) return;
+      set((s) => ({
+        browseFeedsBySource: {
+          ...s.browseFeedsBySource,
+          [sid]: {
+            ...(s.browseFeedsBySource[sid] || {
+              items: [],
+              profiles: [],
+              category: targetCategory,
+              subfilter: targetSubfilter,
+              cursor: null,
+              hasMore: false,
+            }),
+            isLoading: false,
+            isLoadingMore: false,
+            error: err?.message || 'Failed to load browse feed',
+          },
+        },
+      }));
+    }
+  },
+
+  loadMoreBrowseFeed: async (source) => {
+    const sid = String(source || '').trim().toLowerCase();
+    const slice = get().browseFeedsBySource[sid];
+    if (!slice || slice.isLoading || slice.isLoadingMore || !slice.hasMore || !slice.cursor) {
+      return;
+    }
+    browseLoadMoreControllers.get(sid)?.abort();
+    const controller = new AbortController();
+    browseLoadMoreControllers.set(sid, controller);
+    const expectedCategory = slice.category;
+    const expectedSubfilter = slice.subfilter;
+    const expectedCursor = slice.cursor;
+    set((s) => ({
+      browseFeedsBySource: {
+        ...s.browseFeedsBySource,
+        [sid]: { ...slice, isLoadingMore: true, error: null },
+      },
+    }));
+    try {
+      const res = await fetchTimelineBrowsePage({
+        source: sid,
+        category: expectedCategory,
+        subfilter: expectedSubfilter,
+        cursor: expectedCursor,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      set((s) => {
+        const cur = s.browseFeedsBySource[sid];
+        if (
+          !cur
+          || cur.category !== expectedCategory
+          || cur.subfilter !== expectedSubfilter
+          || cur.cursor !== expectedCursor
+        ) {
+          return s;
+        }
+        const seen = new Set(cur.items.map((it) => it.originalUrl || it.albumUrl || it.id));
+        const merged = [...cur.items];
+        for (const item of res.items) {
+          const k = item.originalUrl || item.albumUrl || item.id;
+          if (!seen.has(k)) {
+            seen.add(k);
+            merged.push(item);
+          }
+        }
+        return {
+          browseFeedsBySource: {
+            ...s.browseFeedsBySource,
+            [sid]: {
+              ...cur,
+              items: merged,
+              cursor: res.nextCursor,
+              hasMore: res.hasMore,
+              isLoadingMore: false,
+              error: res.error ?? null,
+            },
+          },
+        };
+      });
+    } catch (err: any) {
+      if (controller.signal.aborted) return;
+      set((s) => {
+        const cur = s.browseFeedsBySource[sid];
+        if (
+          !cur
+          || cur.category !== expectedCategory
+          || cur.subfilter !== expectedSubfilter
+          || cur.cursor !== expectedCursor
+        ) {
+          return s;
+        }
+        return {
+          browseFeedsBySource: {
+            ...s.browseFeedsBySource,
+            [sid]: { ...cur, isLoadingMore: false, error: err?.message || 'Load more failed' },
+          },
+        };
+      });
     }
   },
 
@@ -920,6 +1663,7 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
           fileSizeBytes: resolved.fileSizeBytes || nextItems[index].fileSizeBytes,
           format: resolved.format || nextItems[index].format,
           isResolvedOriginal: true,
+          requiresProxy: resolved.requiresProxy ?? nextItems[index].requiresProxy,
         };
       }
 
@@ -968,6 +1712,370 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
         p.id === postId ? { ...p, ...defined } : p
       ),
     }));
+  },
+
+  loadDirectory: async (source, kind, page = 1, append = false) => {
+    const sid = String(source || '').trim().toLowerCase();
+    const k = String(kind || 'categories').trim().toLowerCase();
+    if (!sid) return;
+    const baseKey = `${sid}:${k}:1`;
+    const key = append || page > 1 ? baseKey : `${sid}:${k}:${page}`;
+    const existing = get().directoriesByKey[key];
+    if (existing && (existing.isLoading || (!append && page === 1 && existing.items.length > 0 && !existing.error))) {
+      return;
+    }
+    set((s) => ({
+      directoriesByKey: {
+        ...s.directoriesByKey,
+        [key]: {
+          items: existing?.items || [],
+          page: existing?.page || page,
+          hasMore: existing?.hasMore ?? false,
+          nextPage: existing?.nextPage ?? null,
+          nextPageUrl: existing?.nextPageUrl ?? null,
+          isLoading: true,
+          error: null,
+        },
+      },
+    }));
+    try {
+      const res = await fetchTimelineDirectory({
+        source: sid, kind: k, page, pageUrl: append ? existing?.nextPageUrl : null,
+      });
+      if (res.error) throw new Error(res.error);
+      set((s) => {
+        const prevItems = append && s.directoriesByKey[key]?.items ? s.directoriesByKey[key].items : [];
+        const seen = new Set(prevItems.map((it) => it.url || it.id));
+        const merged = [...prevItems];
+        for (const it of res.items) {
+          const uk = it.url || it.id;
+          if (!seen.has(uk)) {
+            seen.add(uk);
+            merged.push(it);
+          }
+        }
+        return {
+          directoriesByKey: {
+            ...s.directoriesByKey,
+            [key]: {
+              items: append ? merged : res.items,
+              page: res.page,
+              hasMore: Boolean(res.hasMore),
+              nextPage: res.nextPage ?? (res.hasMore ? res.page + 1 : null),
+              nextPageUrl: res.nextPageUrl,
+              isLoading: false,
+              error: res.error ?? null,
+            },
+          },
+        };
+      });
+    } catch (err: any) {
+      set((s) => ({
+        directoriesByKey: {
+          ...s.directoriesByKey,
+          [key]: {
+            items: existing?.items || [],
+            page: existing?.page || page,
+            hasMore: existing?.hasMore ?? false,
+            nextPage: existing?.nextPage ?? null,
+            nextPageUrl: existing?.nextPageUrl ?? null,
+            isLoading: false,
+            error: err?.message || 'Failed to load directory',
+          },
+        },
+      }));
+    }
+  },
+
+  queueCatalogEnrichment: async (items) => {
+    const pending = items
+      .filter((it) => it?.url && it?.source)
+      .filter((it) => !enrichedCatalogUrls.has(it.url) && !enrichingCatalogUrls.has(it.url))
+      .slice(0, 8);
+    if (pending.length === 0) return;
+    for (const it of pending) enrichingCatalogUrls.add(it.url);
+    try {
+      const metadata = await enrichCatalogBatch(pending);
+      for (const it of pending) {
+        if (metadata && metadata[it.url]) {
+          rememberEnrichedUrl(it.url);
+        }
+      }
+      if (!metadata || Object.keys(metadata).length === 0) return;
+
+      const patchPost = (post: TimelinePost): TimelinePost => {
+        const key = post.originalUrl || post.albumUrl || '';
+        const meta = (key && metadata[key]) || (post.albumUrl && metadata[post.albumUrl]) || undefined;
+        if (!meta) return post;
+        const primaryArtist = Array.isArray(meta.artists) && meta.artists.length > 0 ? meta.artists[0] : undefined;
+        const nextTitle = meta.title && (!post.title || /^\d+$/.test(post.title.trim()) || post.needsEnrichment)
+          ? meta.title
+          : post.title;
+        const rawTags = Array.isArray(meta.tags) ? meta.tags : [];
+        const normalizedTags = rawTags
+          .map((t: any) => (typeof t === 'string' ? t.trim() : String(t?.name || '').trim()))
+          .filter(Boolean);
+        const rawTagEntities = Array.isArray((meta as any).tagEntities)
+          ? (meta as any).tagEntities
+          : rawTags.filter((t: any) => t && typeof t === 'object' && typeof t.name === 'string');
+        const normalizedTagEntities = rawTagEntities
+          .map((t: any) => ({
+            name: String(t?.name || '').trim(),
+            url: typeof t?.url === 'string' ? t.url : undefined,
+            kind: (t?.kind || 'tag') as any,
+          }))
+          .filter((t: any) => Boolean(t.name));
+        return {
+          ...post,
+          title: nextTitle,
+          creatorName: meta.author || primaryArtist?.name || post.creatorName,
+          sourcePage: meta.authorUrl || primaryArtist?.url || post.sourcePage,
+          artists: Array.isArray(meta.artists) && meta.artists.length > 0
+            ? meta.artists.map((a) => ({ ...a, kind: (a.kind || 'artist') as any }))
+            : post.artists,
+          channels: Array.isArray(meta.channels) && meta.channels.length > 0
+            ? meta.channels.map((c) => ({ ...c, kind: (c.kind || 'channel') as any }))
+            : post.channels,
+          tags: normalizedTags.length > 0 ? normalizedTags : post.tags,
+          tagEntities: normalizedTagEntities.length > 0 ? normalizedTagEntities : post.tagEntities,
+          photoCount: typeof meta.photoCount === 'number' ? meta.photoCount : post.photoCount,
+          needsEnrichment: false,
+        };
+      };
+
+      set((s) => {
+        const nextFeeds: Record<string, TimelineBrowseFeedSlice> = { ...s.browseFeedsBySource };
+        for (const [sid, slice] of Object.entries(nextFeeds)) {
+          nextFeeds[sid] = {
+            ...slice,
+            items: slice.items.map(patchPost),
+          };
+        }
+        return {
+          browseFeedsBySource: nextFeeds,
+          posts: s.posts.map(patchPost),
+        };
+      });
+    } catch {
+      // Ignore silent background enrichment failure
+    } finally {
+      for (const it of pending) enrichingCatalogUrls.delete(it.url);
+    }
+  },
+
+  loadForumBoards: async (source) => {
+    const sid = String(source || '').trim().toLowerCase();
+    if (!sid) return;
+    const existing = get().forumBoardsBySource[sid];
+    if (existing && !existing.isLoading && existing.sections.length > 0 && !existing.error) {
+      return;
+    }
+    set((s) => ({
+      forumBoardsBySource: {
+        ...s.forumBoardsBySource,
+        [sid]: { sections: existing?.sections || [], isLoading: true, error: null },
+      },
+    }));
+    try {
+      const res = await fetchForumBoards(sid);
+      set((s) => ({
+        forumBoardsBySource: {
+          ...s.forumBoardsBySource,
+          [sid]: { sections: res.sections, isLoading: false, error: res.error ?? null },
+        },
+      }));
+    } catch (err: any) {
+      set((s) => ({
+        forumBoardsBySource: {
+          ...s.forumBoardsBySource,
+          [sid]: {
+            sections: existing?.sections || [],
+            isLoading: false,
+            error: err?.message || 'Failed to load forum boards',
+          },
+        },
+      }));
+    }
+  },
+
+  openThreadView: async (postOrUrl, title, source) => {
+    const threadUrl = typeof postOrUrl === 'string'
+      ? postOrUrl.trim()
+      : String(postOrUrl.originalUrl || postOrUrl.albumUrl || '').trim();
+    if (!threadUrl) return;
+    const resolvedTitle = title || (typeof postOrUrl === 'string' ? '' : postOrUrl.title) || 'Thread';
+    const resolvedSource = source || (typeof postOrUrl === 'string' ? undefined : postOrUrl.source);
+    threadViewController?.abort();
+    const controller = new AbortController();
+    threadViewController = controller;
+    set({
+      activeThreadView: {
+        threadUrl,
+        title: resolvedTitle,
+        source: resolvedSource,
+        isLoading: true,
+        data: null,
+        error: null,
+      },
+    });
+    try {
+      const data = await fetchForumThreadPage({ url: threadUrl, page: 1, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      set((s) => (
+        s.activeThreadView?.threadUrl === threadUrl
+          ? {
+              activeThreadView: {
+                ...s.activeThreadView,
+                title: data.title || resolvedTitle,
+                isLoading: false,
+                data,
+                error: data.error ?? null,
+              },
+            }
+          : s
+      ));
+    } catch (err: any) {
+      if (controller.signal.aborted) return;
+      set((s) => (
+        s.activeThreadView?.threadUrl === threadUrl
+          ? {
+              activeThreadView: {
+                ...s.activeThreadView,
+                isLoading: false,
+                error: err?.message || 'Failed to load thread',
+              },
+            }
+          : s
+      ));
+    }
+  },
+
+  loadThreadPage: async (pageOrUrl) => {
+    const current = get().activeThreadView;
+    if (!current || current.isLoading) return;
+    threadViewController?.abort();
+    const controller = new AbortController();
+    threadViewController = controller;
+    set((s) => (
+      s.activeThreadView
+        ? { activeThreadView: { ...s.activeThreadView, isLoading: true, error: null } }
+        : s
+    ));
+    try {
+      const data = await fetchForumThreadPage(
+        typeof pageOrUrl === 'number'
+          ? { url: current.threadUrl, page: pageOrUrl, signal: controller.signal }
+          : { url: current.threadUrl, pageUrl: pageOrUrl, signal: controller.signal }
+      );
+      if (controller.signal.aborted) return;
+      set((s) => (
+        s.activeThreadView?.threadUrl === current.threadUrl
+          ? {
+              activeThreadView: {
+                ...s.activeThreadView,
+                title: data.title || s.activeThreadView.title,
+                isLoading: false,
+                data,
+                error: data.error ?? null,
+              },
+            }
+          : s
+      ));
+    } catch (err: any) {
+      if (controller.signal.aborted) return;
+      set((s) => (
+        s.activeThreadView
+          ? { activeThreadView: { ...s.activeThreadView, isLoading: false, error: err?.message || 'Failed to load thread page' } }
+          : s
+      ));
+    }
+  },
+
+  closeThreadView: () => {
+    threadViewController?.abort();
+    threadViewController = undefined;
+    set({ activeThreadView: null });
+  },
+
+  loadMoreCreatorProfileAlbums: async (creatorId, creatorOverride, existingPostsOverride) => {
+    const state = get();
+    const creator = creatorOverride || state.creatorProfiles[creatorId] || state.creators.find((c) => c.id === creatorId);
+    if (!creator || !creator.profileUrl || !creator.profileHasMore || state.isLoadingMoreProfile) {
+      return null;
+    }
+    const nextPage = creator.profileNextPage || ((creator.profilePage || 1) + 1);
+    profileLoadMoreController?.abort();
+    const controller = new AbortController();
+    profileLoadMoreController = controller;
+    set({ isLoadingMoreProfile: true });
+    try {
+      const isEn = useAppStore.getState().settings?.language === 'en-US';
+      const basePosts = existingPostsOverride ?? get().posts.filter((p) => doesPostMatchCreator(p, creator));
+      const snap = await loadTimelineCreatorProfile({
+        url: creator.profileNextPageUrl || creator.profileUrl,
+        existingCreator: creator,
+        expectedName: creator.name,
+        seedAvatar: creator.avatar,
+        existingPosts: basePosts,
+        signal: controller.signal,
+        unnamedLabel: isEn ? 'Creator' : 'Criador',
+        page: creator.profileNextPageUrl ? 1 : nextPage,
+        sort: creator.activeSort,
+      });
+      const mergedCreatorPosts = mergeRefreshedTimelinePosts(basePosts, snap.posts);
+      set((s) => ({
+        isLoadingMoreProfile: false,
+        creatorProfiles: {
+          ...s.creatorProfiles,
+          [creator.id]: snap.creator,
+        },
+        posts: mergeRefreshedTimelinePosts(s.posts, mergedCreatorPosts),
+      }));
+      return { creator: snap.creator, posts: mergedCreatorPosts };
+    } catch {
+      set({ isLoadingMoreProfile: false });
+      return null;
+    }
+  },
+
+  switchCreatorProfileSort: async (creatorId, sort, creatorOverride) => {
+    const state = get();
+    const creator = creatorOverride || state.creatorProfiles[creatorId] || state.creators.find((c) => c.id === creatorId);
+    if (!creator || !creator.profileUrl) return null;
+    const cleanSort = String(sort || '').trim().toLowerCase();
+    if (!cleanSort) return null;
+    profileLoadMoreController?.abort();
+    const controller = new AbortController();
+    profileLoadMoreController = controller;
+    set({ isLoadingMoreProfile: true });
+    try {
+      const isEn = useAppStore.getState().settings?.language === 'en-US';
+      const snap = await loadTimelineCreatorProfile({
+        url: creator.profileUrl,
+        existingCreator: { ...creator, activeSort: cleanSort },
+        expectedName: creator.name,
+        seedAvatar: creator.avatar,
+        existingPosts: [],
+        signal: controller.signal,
+        unnamedLabel: isEn ? 'Creator' : 'Criador',
+        page: 1,
+        sort: cleanSort,
+      });
+      if (controller.signal.aborted) return null;
+      const updatedCreator: TimelineCreator = { ...snap.creator, activeSort: cleanSort };
+      set((s) => ({
+        isLoadingMoreProfile: false,
+        creatorProfiles: {
+          ...s.creatorProfiles,
+          [creator.id]: updatedCreator,
+        },
+        posts: mergeRefreshedTimelinePosts(s.posts, snap.posts),
+      }));
+      return { creator: updatedCreator, posts: snap.posts };
+    } catch {
+      set({ isLoadingMoreProfile: false });
+      return null;
+    }
   },
 
   toggleGlobalMute: () => set((state) => ({ isGlobalMuted: !state.isGlobalMuted })),

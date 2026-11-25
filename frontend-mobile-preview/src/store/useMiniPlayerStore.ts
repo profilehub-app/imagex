@@ -1,7 +1,7 @@
 /**
  * useMiniPlayerStore.ts
  *
- * Global state store for IMAGEX.AI Floating Mini-Player.
+ * Global state store for IMAGEX Floating Mini-Player.
  * Governs active floating video session, in-app lateral Edge-Stash snaps (<= 28px),
  * viewport clamp math clearing MiniTaskDock (--mini-task-dock-height),
  * size presets ('sm' | 'md' | 'lg'), queue advance, and handoff synchronization.

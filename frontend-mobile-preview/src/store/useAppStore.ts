@@ -652,7 +652,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const storedZoom = localStorage.getItem('imagex_album_zoom_cols');
       if (storedZoom) savedAlbumZoomCols = Number(storedZoom) || 4;
 
-      const storedChat = localStorage.getItem('imagex_ai_chat');
+      const storedChat = localStorage.getItem('imagex_chat');
       if (storedChat) {
         const parsed = JSON.parse(storedChat);
         if (Array.isArray(parsed)) savedChatMessages = parsed;

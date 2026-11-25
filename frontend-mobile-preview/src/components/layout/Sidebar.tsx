@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { version as appVersion } from '../../../package.json';
 import {
   Zap,
   Compass,
@@ -30,6 +31,7 @@ import { useProfileHubLibraryStore } from '../../store/useProfileHubLibraryStore
 import { translations } from '../../i18n/translations';
 import { updateNeedsAttention } from '../../services/updateAlerts';
 import { FeedbackButton } from '../common/FeedbackButton';
+import { SupportButton } from '../common/SupportButton';
 import { ViewId } from '../../types';
 
 interface SidebarProps {
@@ -144,7 +146,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
                   className="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/20 hover:bg-brand-500/30 text-brand-400 font-mono font-semibold transition-colors cursor-pointer flex items-center gap-1"
                   title={settings.language === 'en-US' ? 'Check for updates' : 'Verificar atualizações do app'}
                 >
-                  v5.7.0
+                  v{appVersion}
                   {updateAttention && (
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
                   )}
@@ -169,8 +171,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
             type="button"
             onClick={() => setUpdateModalOpen(true)}
             className="w-10 h-10 mx-auto rounded-xl overflow-hidden shadow-glow-brand border border-white/10 relative cursor-pointer block p-0 bg-slate-950"
-            title={updateAttention ? updateLabel : 'IMAGEX v5.7.0'}
-            aria-label={updateAttention ? updateLabel : 'IMAGEX v5.7.0'}
+            title={updateAttention ? updateLabel : `IMAGEX v${appVersion}`}
+            aria-label={updateAttention ? updateLabel : `IMAGEX v${appVersion}`}
           >
             <img
               src="/app-icon.png"
@@ -268,8 +270,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
         ))}
       </div>
 
-      {/* Feedback entry */}
-      <div className="px-3 pb-2">
+      {/* Community support and feedback entries */}
+      <div className="px-3 pb-2 space-y-2">
+        <SupportButton compact={collapsed && !isMobileOpen} onOpen={onCloseMobile} />
         <FeedbackButton compact={collapsed && !isMobileOpen} onOpen={onCloseMobile} />
       </div>
     </div>

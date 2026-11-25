@@ -1162,3 +1162,12 @@ input[type="range"] {
   }
 }
 
+/* Native top-layer modal scroll containment */
+dialog:modal {
+  overscroll-behavior: contain;
+}
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+

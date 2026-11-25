@@ -31,6 +31,12 @@ except ImportError:
 from ..core.models import Album, AlbumImage, ResolutionMethod, TelemetryMetrics
 from ..core.media_classification import image_header_facts, media_source_format
 from ..core.network_profiles import get_preseeded_session_cookies, is_static_preview_upgradeable, _b64d
+from ..server.original_image_resolver import (
+    MIN_MEDIA_CANDIDATE_BYTES,
+    MIN_MEDIA_CANDIDATE_DIM,
+    extract_targeted_gateway_form,
+    is_placeholder_media_url,
+)
 from .knowledge_bridge import ScoutKnowledgeBridge, extract_base_domain
 
 logger = logging.getLogger("gemini_surgical_scout")
@@ -126,7 +132,7 @@ def parse_image_dimensions(chunk: bytes) -> tuple:
 
 def get_true_image_url(url: str, session: requests.Session, referer: str) -> Optional[str]:
     """PHYSICAL X-RAY: Downloads the first bytes to prove it's a real image and captures redirects, dimensions and real file size."""
-    if not url:
+    if not url or is_placeholder_media_url(url):
         return None
     try:
         if url.startswith("//"):
@@ -145,10 +151,12 @@ def get_true_image_url(url: str, session: requests.Session, referer: str) -> Opt
 
                 content_length = res.headers.get("Content-Length")
                 file_sz = int(content_length) if content_length and content_length.isdigit() and int(content_length) > 0 else None
+                if file_sz is not None and file_sz < MIN_MEDIA_CANDIDATE_BYTES:
+                    return None
 
                 # Read first 4096 bytes to check file DNA and capture real width/height
                 chunk = res.raw.read(4096)
-                if not chunk:
+                if not chunk or len(chunk) < MIN_MEDIA_CANDIDATE_BYTES:
                     return None
 
                 # Rejeita payloads anômalos de erro HTTP ou bloqueio de hotlink (< 20KB)
@@ -172,7 +180,11 @@ def get_true_image_url(url: str, session: requests.Session, referer: str) -> Opt
 
                 if is_jpeg or is_png or is_gif or is_webp or is_jfif or is_exif or ("image/" in content_type and len(chunk) > 5):
                     final_url = str(res.url)
+                    if is_placeholder_media_url(final_url):
+                        return None
                     img_w, img_h = parse_image_dimensions(chunk)
+                    if (img_w and img_w < MIN_MEDIA_CANDIDATE_DIM) or (img_h and img_h < MIN_MEDIA_CANDIDATE_DIM):
+                        return None
                     meta_dict: Dict[str, Any] = {"file_size": file_sz}
                     meta_dict.update(image_header_facts(chunk, complete=file_sz == len(chunk)))
                     if is_gif:
@@ -199,23 +211,9 @@ def resolve_gateway_intermediate_form(viewer_url: str, session: requests.Session
             return None
 
         soup1 = BeautifulSoup(r1.text, "html.parser")
-        form = soup1.find("form")
-        if form:
-            action = form.get("action") or viewer_url
-            action_url = urljoin(viewer_url, action)
-
-            payload = {}
-            for inp in form.find_all("input"):
-                name = inp.get("name")
-                val = inp.get("value", "")
-                if name:
-                    payload[name] = val
-
-            if "imgContinue" not in payload:
-                btn = form.find("input", {"id": "continuebutton"}) or form.find("input", {"type": "submit"})
-                if btn:
-                    payload[btn.get("name", "imgContinue")] = btn.get("value", "Continue to image ... ")
-
+        form_spec = extract_targeted_gateway_form(r1.text, viewer_url)
+        if form_spec:
+            action_url, payload = form_spec
             parsed_viewer = urlparse(viewer_url)
             origin_hdr = f"{parsed_viewer.scheme}://{parsed_viewer.netloc}"
             r2 = session.post(action_url, data=payload, headers={"Referer": viewer_url, "Origin": origin_hdr}, timeout=12)
@@ -231,7 +229,7 @@ def resolve_gateway_intermediate_form(viewer_url: str, session: requests.Session
                 )
                 if img:
                     raw_src = img.get("src") or img.get("data-src") or img.get("data-original")
-                    if raw_src:
+                    if raw_src and not is_placeholder_media_url(str(raw_src)):
                         raw_src = str(raw_src).strip()
                         return "https:" + raw_src if raw_src.startswith("//") else urljoin(viewer_url, raw_src)
 
@@ -416,19 +414,27 @@ class GeminiSurgicalScout:
             alt_text = ""
 
             if img:
-                raw_s = img.get("src") or ""
-                data_s = img.get("data-src") or img.get("data-original") or img.get("data-lazy") or ""
-                if not raw_s or "data:image" in raw_s or "1x1" in raw_s or "blank" in raw_s:
-                    raw_thumb = data_s
-                else:
-                    raw_thumb = raw_s or data_s
+                candidate_attrs = [
+                    img.get("data-src"),
+                    img.get("data-original"),
+                    img.get("data-lazy-src") or img.get("data-lazy"),
+                    img.get("src"),
+                ]
+                raw_thumb = next(
+                    (
+                        str(cand).strip()
+                        for cand in candidate_attrs
+                        if cand and not is_placeholder_media_url(str(cand).strip())
+                    ),
+                    "",
+                )
                 if any(junk in str(raw_thumb).lower() for junk in JUNK_PATTERNS) or "/flags/" in str(raw_thumb).lower():
                     continue
                 if raw_thumb:
-                    thumb_src = "https:" + raw_thumb if str(raw_thumb).startswith("//") else urljoin(page_url, str(raw_thumb).strip())
+                    thumb_src = "https:" + raw_thumb if raw_thumb.startswith("//") else urljoin(page_url, raw_thumb)
                 alt_text = img.get("alt", "").strip()
 
-            if "logo" in href_lower or href_lower.endswith(".svg") or href.strip("/") == page_url.strip("/"):
+            if "logo" in href_lower or href_lower.endswith(".svg") or href.strip("/") == page_url.strip("/") or is_placeholder_media_url(href):
                 continue
 
             is_direct_ext = bool(re.search(r"\.(jpg|jpeg|png|webp|gif|bmp)(\?.*)?$", href, re.I))
@@ -447,10 +453,17 @@ class GeminiSurgicalScout:
         # Fallback: if no <a> tags found, extract loose <img> in post container
         if not items:
             for img in post_container.find_all("img"):
-                raw_src = img.get("src") or img.get("data-src") or img.get("data-original")
-                if not raw_src or any(junk in str(raw_src).lower() for junk in JUNK_PATTERNS):
+                raw_src = next(
+                    (
+                        str(cand).strip()
+                        for cand in (img.get("data-src"), img.get("data-original"), img.get("data-lazy"), img.get("src"))
+                        if cand and not is_placeholder_media_url(str(cand).strip())
+                    ),
+                    "",
+                )
+                if not raw_src or any(junk in raw_src.lower() for junk in JUNK_PATTERNS):
                     continue
-                src = "https:" + str(raw_src).strip() if str(raw_src).startswith("//") else urljoin(page_url, str(raw_src).strip())
+                src = "https:" + raw_src if raw_src.startswith("//") else urljoin(page_url, raw_src)
                 if src not in seen_urls:
                     seen_urls.add(src)
                     items.append({

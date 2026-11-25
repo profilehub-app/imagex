@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")"
 
 echo "=============================================================="
-echo "      IMAGEX.AI - Servidor Local (Linux / macOS)"
+echo "      IMAGEX - Servidor Local (Linux / macOS)"
 echo "=============================================================="
 echo ""
 

@@ -9,71 +9,87 @@ from bs4 import BeautifulSoup
 from selectolax.lexbor import LexborHTMLParser
 
 if __package__:
+    from .connector_registry import VideoPortalDescriptor, find_connector_for_url
+    from .video_portal_engine import (
+        extract_portal_max_page,
+        parse_portal_albums,
+        parse_portal_playlists,
+        parse_portal_profile_root,
+        parse_portal_video_cards,
+    )
     from .profile_hub_workers import (
-        extract_eporner_albums_lexbor,
-        extract_eporner_playlists_lexbor,
-        extract_eporner_root_lexbor,
-        extract_eporner_videos_lexbor,
+        extract_portal_grid_albums_lexbor,
+        extract_portal_grid_playlists_lexbor,
+        extract_portal_grid_root_lexbor,
+        extract_portal_grid_videos_lexbor,
         extract_generic_profile_lexbor,
-        extract_pornhub_albums_lexbor,
-        extract_pornhub_gifs_lexbor,
-        extract_pornhub_playlists_lexbor,
-        extract_pornhub_root_lexbor,
-        extract_pornhub_videos_lexbor,
+        extract_portal_tube_albums_lexbor,
+        extract_portal_tube_gifs_lexbor,
+        extract_portal_tube_playlists_lexbor,
+        extract_portal_tube_root_lexbor,
+        extract_portal_tube_videos_lexbor,
         extract_youtube_albums_lexbor,
         extract_youtube_playlists_lexbor,
         extract_youtube_root_lexbor,
         extract_youtube_videos_lexbor,
-        extract_xhamster_albums_lexbor,
-        extract_xhamster_max_video_page,
-        extract_xhamster_root_lexbor,
-        extract_xhamster_shorts_lexbor,
-        extract_xhamster_videos_lexbor,
+        extract_portal_state_albums_lexbor,
+        extract_portal_state_max_video_page,
+        extract_portal_state_root_lexbor,
+        extract_portal_state_shorts_lexbor,
+        extract_portal_state_videos_lexbor,
         get_worker_pool,
         http_url as _http_url,
         image_url as _lexbor_image_url,
-        is_pornhub_host,
-        is_pornhub_profile_url,
-        is_xhamster_host,
-        is_xhamster_profile_url,
+        is_portal_tube_host,
+        is_portal_tube_profile_url,
+        is_portal_state_host,
+        is_portal_state_profile_url,
         is_youtube_channel_url,
         is_youtube_host,
-        normalize_pornhub_profile_base_url,
-        normalize_xhamster_profile_base_url,
+        normalize_portal_tube_profile_base_url,
+        normalize_portal_state_profile_base_url,
         worker_execute,
     )
 else:
+    from src.server.connector_registry import VideoPortalDescriptor, find_connector_for_url
+    from src.server.video_portal_engine import (
+        extract_portal_max_page,
+        parse_portal_albums,
+        parse_portal_playlists,
+        parse_portal_profile_root,
+        parse_portal_video_cards,
+    )
     from src.server.profile_hub_workers import (
-        extract_eporner_albums_lexbor,
-        extract_eporner_playlists_lexbor,
-        extract_eporner_root_lexbor,
-        extract_eporner_videos_lexbor,
+        extract_portal_grid_albums_lexbor,
+        extract_portal_grid_playlists_lexbor,
+        extract_portal_grid_root_lexbor,
+        extract_portal_grid_videos_lexbor,
         extract_generic_profile_lexbor,
-        extract_pornhub_albums_lexbor,
-        extract_pornhub_gifs_lexbor,
-        extract_pornhub_playlists_lexbor,
-        extract_pornhub_root_lexbor,
-        extract_pornhub_videos_lexbor,
+        extract_portal_tube_albums_lexbor,
+        extract_portal_tube_gifs_lexbor,
+        extract_portal_tube_playlists_lexbor,
+        extract_portal_tube_root_lexbor,
+        extract_portal_tube_videos_lexbor,
         extract_youtube_albums_lexbor,
         extract_youtube_playlists_lexbor,
         extract_youtube_root_lexbor,
         extract_youtube_videos_lexbor,
-        extract_xhamster_albums_lexbor,
-        extract_xhamster_max_video_page,
-        extract_xhamster_root_lexbor,
-        extract_xhamster_shorts_lexbor,
-        extract_xhamster_videos_lexbor,
+        extract_portal_state_albums_lexbor,
+        extract_portal_state_max_video_page,
+        extract_portal_state_root_lexbor,
+        extract_portal_state_shorts_lexbor,
+        extract_portal_state_videos_lexbor,
         get_worker_pool,
         http_url as _http_url,
         image_url as _lexbor_image_url,
-        is_pornhub_host,
-        is_pornhub_profile_url,
-        is_xhamster_host,
-        is_xhamster_profile_url,
+        is_portal_tube_host,
+        is_portal_tube_profile_url,
+        is_portal_state_host,
+        is_portal_state_profile_url,
         is_youtube_channel_url,
         is_youtube_host,
-        normalize_pornhub_profile_base_url,
-        normalize_xhamster_profile_base_url,
+        normalize_portal_tube_profile_base_url,
+        normalize_portal_state_profile_base_url,
         worker_execute,
     )
 
@@ -96,7 +112,7 @@ def _to_lexbor_or_str(node):
     return str(node)
 
 
-def assemble_eporner_profile(
+def assemble_portal_grid_profile(
     source_url: str,
     root_info: dict,
     video_batches: list,
@@ -196,13 +212,13 @@ def assemble_eporner_profile(
             search_gifs_total_reported = search_gifs_pair[2]
 
     if canonical_gifs and not any(a.get("id") == "alb-gifs" for a in canonical_albums):
-        is_xh = is_xhamster_host(source_url)
+        is_xh = is_portal_state_host(source_url)
         base_gif_url = (
-            f"{normalize_xhamster_profile_base_url(source_url)}/shorts"
+            f"{normalize_portal_state_profile_base_url(source_url)}/shorts"
             if is_xh
             else (
-                f"{normalize_pornhub_profile_base_url(source_url)}/gifs"
-                if is_pornhub_host(source_url)
+                f"{normalize_portal_tube_profile_base_url(source_url)}/gifs"
+                if is_portal_tube_host(source_url)
                 else f"{source_url.rstrip('/')}/gifs"
             )
         )
@@ -243,7 +259,7 @@ def assemble_eporner_profile(
     if canonical_search_gifs and not any(a.get("id") == "alb-gifs-search" for a in canonical_albums):
         from urllib.parse import quote_plus
         p_name = root_info.get("name") or "Comunidade"
-        search_gif_url = f"https://www.pornhub.com/gifs/search?search={quote_plus(p_name.strip().lower())}"
+        search_gif_url = f"https://portal-tube.example/gifs/search?search={quote_plus(p_name.strip().lower())}"
         search_thumb = (
             next((g.get("thumbnailUrl") for g in canonical_search_gifs if g.get("thumbnailUrl")), "")
             or (root_info.get("avatar") or "")
@@ -417,6 +433,150 @@ def assemble_eporner_profile(
     }
 
 
+def assemble_video_portal_profile(
+    source_url: str,
+    desc: VideoPortalDescriptor,
+    root_meta: dict,
+    *,
+    videos: list[dict] | None = None,
+    shorts: list[dict] | None = None,
+    albums: list[dict] | None = None,
+    playlists: list[dict] | None = None,
+    total_videos_reported: int | None = None,
+    playlist_videos_map: dict | None = None,
+) -> dict:
+    """Assemble standardized Profile Hub manifest from generic VideoPortalDescriptor parses."""
+    def _section(items):
+        return {
+            "status": "complete",
+            "loaded_count": len(items),
+            "items": items,
+        }
+
+    def _dedup(items, key="originalUrl"):
+        out = []
+        seen = set()
+        for item in items or []:
+            k = item.get(key) or item.get("url") or item.get("id")
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            out.append(item)
+        return out
+
+    canon_videos = _dedup(videos or [], "originalUrl")
+    canon_shorts = _dedup(shorts or [], "originalUrl")
+    canon_albums = _dedup(albums or [], "originalUrl")
+    canon_playlists = _dedup(playlists or [], "originalUrl")
+
+    # Normalize URL key alongside originalUrl for frontend cards expecting item.url
+    for item in (*canon_albums, *canon_playlists):
+        if item.get("originalUrl") and not item.get("url"):
+            item["url"] = item["originalUrl"]
+
+    slug_tail = urlsplit(source_url).path.strip("/").rsplit("/", 1)[-1] or desc.id
+    name = (root_meta.get("name") or slug_tail).strip()
+    avatar = root_meta.get("avatarUrl") or (canon_videos[0].get("thumbnailUrl") if canon_videos else "") or ""
+    banner = root_meta.get("bannerUrl") or (canon_videos[0].get("thumbnailUrl") if canon_videos else "") or ""
+    bio = (root_meta.get("bio") or "").strip()
+    entity_kind = root_meta.get("entityKind") or "creator"
+    portal_info = dict(root_meta.get("portalInfo") or {})
+    featured_performers = list(root_meta.get("featuredPerformers") or [])
+    affiliated_channels = list(root_meta.get("affiliatedChannels") or [])
+    interests = list(root_meta.get("interests") or [])
+    related_entities = list(root_meta.get("relatedEntities") or [])
+
+    topic_total = root_meta.get("topicTotalResults")
+    reported_vid_num = max(
+        int(total_videos_reported or 0),
+        int(portal_info.get("totalFreeVideos") or 0),
+        int(topic_total or 0),
+        len(canon_videos),
+    )
+    stats: dict[str, Any] = {
+        "videos": reported_vid_num,
+        "playlists": len(canon_playlists),
+        "albums": len(canon_albums),
+    }
+    if canon_shorts or portal_info.get("totalShorts"):
+        stats["shorts"] = max(int(portal_info.get("totalShorts") or 0), len(canon_shorts))
+        stats["gifs"] = stats["shorts"]
+    if root_meta.get("subscribersCount") is not None:
+        stats["subscribers"] = root_meta["subscribersCount"]
+    if root_meta.get("totalViewsCount") is not None:
+        stats["views"] = root_meta["totalViewsCount"]
+    if portal_info.get("ratingPercent"):
+        stats["rating"] = portal_info["ratingPercent"]
+
+    highlights = []
+    for item in canon_videos[:2]:
+        highlights.append({
+            "id": f"hl-v-{item.get('id')}",
+            "title": item.get("title") or "Video",
+            "subtitle": item.get("duration") or "",
+            "thumbnailUrl": item.get("thumbnailUrl") or "",
+            "type": "video",
+            "collection_key": item.get("originalUrl") or "",
+        })
+
+    handle_clean = slug_tail.replace(" ", "")
+    profile_hero_data = {
+        "id": source_url,
+        "name": name,
+        "handle": f"@{handle_clean}",
+        "source": desc.id,
+        "entityKind": entity_kind,
+        "tagline": bio or desc.display_name,
+        "avatarUrl": avatar,
+        "coverUrl": banner or avatar,
+        "bannerUrl": banner,
+        "verified": bool(root_meta.get("verified", False)),
+        "following": False,
+        "stats": stats,
+        "destinationFolder": f"{name} (ImageX)",
+        "availableFolders": [],
+        "bio_details": {"bio": bio, **portal_info} if (bio or portal_info) else {},
+        "portalInfo": portal_info,
+        "featuredPerformers": featured_performers,
+        "affiliatedChannels": affiliated_channels,
+        "interests": interests,
+        "social_links": [],
+        "relatedEntities": related_entities,
+    }
+
+    return {
+        "success": True,
+        "profile_key": source_url,
+        "source_url": source_url,
+        "source": desc.id,
+        "entityKind": entity_kind,
+        "portalInfo": portal_info,
+        "featuredPerformers": featured_performers,
+        "affiliatedChannels": affiliated_channels,
+        "interests": interests,
+        "relatedEntities": related_entities,
+        "name": name,
+        "description": bio,
+        "cover_url": avatar,
+        "profile_data": profile_hero_data,
+        "canonical_highlights": highlights,
+        "canonical_playlists": canon_playlists,
+        "canonical_albums": canon_albums,
+        "canonical_videos": canon_videos,
+        "canonical_shorts": canon_shorts,
+        "canonical_gifs": canon_shorts,
+        "canonical_search_gifs": [],
+        "playlist_videos_map": playlist_videos_map or {},
+        "playlists": _section(canon_playlists),
+        "albums": _section(canon_albums),
+        "highlights": _section(highlights),
+        "videos": _section(canon_videos),
+        "shorts": _section(canon_shorts),
+        "gifs": _section(canon_shorts),
+        "search_gifs": _section([]),
+    }
+
+
 def parse_profile_page(
     source_url,
     html,
@@ -431,9 +591,9 @@ def parse_profile_page(
     if isinstance(html, dict) and "videos" in html and "structured_bio" in html:
         root_info = html
         is_youtube = root_info.get("platform") == "youtube"
-        is_pornhub = root_info.get("platform") == "pornhub"
-        is_xhamster = root_info.get("platform") == "xhamster"
-        is_eporner = not is_youtube and not is_pornhub and not is_xhamster
+        is_portal_tube = root_info.get("platform") == "portal_tube"
+        is_portal_state = root_info.get("platform") == "portal_state"
+        is_portal_grid = not is_youtube and not is_portal_tube and not is_portal_state
         root_tree = None
     else:
         converted = _to_lexbor_or_str(html)
@@ -442,22 +602,62 @@ def parse_profile_page(
         is_youtube = is_youtube_channel_url(source_url) or (
             is_youtube_host(source_url) and "ytInitialData" in (html if isinstance(html, str) else "")
         )
-        is_pornhub = not is_youtube and (
-            is_pornhub_profile_url(source_url)
-            or is_pornhub_host(source_url)
+        is_portal_tube = not is_youtube and (
+            is_portal_tube_profile_url(source_url)
+            or is_portal_tube_host(source_url)
             or (root_tree.css_first("li.videoBox, .pornstarName, #getAvatar") is not None)
         )
-        is_xhamster = not is_youtube and not is_pornhub and (
-            is_xhamster_profile_url(source_url)
-            or is_xhamster_host(source_url)
-            or (root_tree.css_first(".landing-info, .channel-header, .video-thumb, [data-video-id]") is not None and "xhamster" in (html if isinstance(html, str) else ""))
+        is_portal_state = not is_youtube and not is_portal_tube and (
+            is_portal_state_profile_url(source_url)
+            or is_portal_state_host(source_url)
+            or (root_tree.css_first(".landing-info, .channel-header, .video-thumb, [data-video-id]") is not None and "portal_state" in (html if isinstance(html, str) else ""))
         )
-        is_eporner = not is_youtube and not is_pornhub and not is_xhamster and (
-            "eporner" in netloc
+        is_portal_grid = not is_youtube and not is_portal_tube and not is_portal_state and (
+            "portal_grid" in netloc
             or root_tree.css_first("div[class*=psbio]") is not None
             or root_tree.css_first("div.pornstar-video-results-layout") is not None
         )
         root_info = None
+
+    if not is_youtube and not is_portal_tube and not is_portal_state and not is_portal_grid:
+        vp_conn = find_connector_for_url(source_url)
+        if isinstance(vp_conn, VideoPortalDescriptor):
+            html_str = html if isinstance(html, str) else (root_tree.html if root_tree is not None else "")
+            if isinstance(html, dict) and "metadata" in html:
+                vp_root = html["metadata"]
+                vp_videos = list(html.get("videos") or [])
+            else:
+                vp_root = parse_portal_profile_root(html_str, source_url, vp_conn)
+                vp_videos = parse_portal_video_cards(html_str, source_url, vp_conn)
+            for item in extra_video_soups or []:
+                if isinstance(item, list):
+                    vp_videos.extend(item)
+                elif isinstance(item, tuple) and item:
+                    vp_videos.extend(item[0])
+                elif isinstance(item, str):
+                    vp_videos.extend(parse_portal_video_cards(item, source_url, vp_conn))
+            vp_albums = []
+            if isinstance(photos_html, list):
+                vp_albums = photos_html
+            elif isinstance(photos_html, str):
+                vp_albums = parse_portal_albums(photos_html, source_url, vp_conn)
+            vp_playlists = []
+            if isinstance(playlists_html, list):
+                for entry in playlists_html:
+                    if isinstance(entry, dict):
+                        vp_playlists.append(entry)
+                    elif isinstance(entry, str):
+                        vp_playlists.extend(parse_portal_playlists(entry, source_url, vp_conn, vp_root.get("avatarUrl", "")))
+            vp_shorts = list(gifs_html) if isinstance(gifs_html, list) else []
+            return assemble_video_portal_profile(
+                source_url,
+                vp_conn,
+                vp_root,
+                videos=vp_videos,
+                shorts=vp_shorts,
+                albums=vp_albums,
+                playlists=vp_playlists,
+            )
 
     if is_youtube:
         if root_info is None:
@@ -492,7 +692,7 @@ def parse_profile_page(
                 )
                 playlist_batches.append((c_pl, r_pl))
 
-        return assemble_eporner_profile(
+        return assemble_portal_grid_profile(
             source_url,
             root_info,
             video_batches,
@@ -501,22 +701,22 @@ def parse_profile_page(
             first_playlist_videos=first_playlist_videos,
         )
 
-    if is_pornhub:
+    if is_portal_tube:
         if root_info is None:
-            root_info = extract_pornhub_root_lexbor(source_url, html if isinstance(html, str) else root_tree)
+            root_info = extract_portal_tube_root_lexbor(source_url, html if isinstance(html, str) else root_tree)
 
         video_batches = []
         for item in extra_video_soups or []:
             if isinstance(item, tuple) and len(item) == 2:
                 video_batches.append(item)
             else:
-                video_batches.append(extract_pornhub_videos_lexbor(source_url, _to_lexbor_or_str(item)))
+                video_batches.append(extract_portal_tube_videos_lexbor(source_url, _to_lexbor_or_str(item)))
 
         if photos_html is not None:
             if isinstance(photos_html, tuple) and len(photos_html) == 2:
                 albums_pair = photos_html
             else:
-                albums_pair = extract_pornhub_albums_lexbor(source_url, _to_lexbor_or_str(photos_html))
+                albums_pair = extract_portal_tube_albums_lexbor(source_url, _to_lexbor_or_str(photos_html))
         else:
             albums_pair = ([], [])
 
@@ -529,7 +729,7 @@ def parse_profile_page(
             if isinstance(ph, tuple) and len(ph) >= 2:
                 playlist_batches.append((ph[0], ph[1]))
             else:
-                c_pl, r_pl = extract_pornhub_playlists_lexbor(source_url, _to_lexbor_or_str(ph), avatar)
+                c_pl, r_pl = extract_portal_tube_playlists_lexbor(source_url, _to_lexbor_or_str(ph), avatar)
                 playlist_batches.append((c_pl, r_pl))
 
         gifs_pair = None
@@ -537,16 +737,16 @@ def parse_profile_page(
             if isinstance(gifs_html, tuple) and len(gifs_html) >= 2:
                 gifs_pair = gifs_html
             else:
-                gifs_pair = extract_pornhub_gifs_lexbor(source_url, _to_lexbor_or_str(gifs_html))
+                gifs_pair = extract_portal_tube_gifs_lexbor(source_url, _to_lexbor_or_str(gifs_html))
 
         search_gifs_pair = None
         if search_gifs_html is not None:
             if isinstance(search_gifs_html, tuple) and len(search_gifs_html) >= 2:
                 search_gifs_pair = search_gifs_html
             else:
-                search_gifs_pair = extract_pornhub_gifs_lexbor(source_url, _to_lexbor_or_str(search_gifs_html))
+                search_gifs_pair = extract_portal_tube_gifs_lexbor(source_url, _to_lexbor_or_str(search_gifs_html))
 
-        return assemble_eporner_profile(
+        return assemble_portal_grid_profile(
             source_url,
             root_info,
             video_batches,
@@ -557,22 +757,22 @@ def parse_profile_page(
             search_gifs_pair=search_gifs_pair,
         )
 
-    if is_xhamster:
+    if is_portal_state:
         if root_info is None:
-            root_info = extract_xhamster_root_lexbor(source_url, html if isinstance(html, str) else root_tree)
+            root_info = extract_portal_state_root_lexbor(source_url, html if isinstance(html, str) else root_tree)
 
         video_batches = []
         for item in extra_video_soups or []:
             if isinstance(item, tuple) and len(item) == 2:
                 video_batches.append(item)
             else:
-                video_batches.append(extract_xhamster_videos_lexbor(source_url, _to_lexbor_or_str(item)))
+                video_batches.append(extract_portal_state_videos_lexbor(source_url, _to_lexbor_or_str(item)))
 
         if photos_html is not None:
             if isinstance(photos_html, tuple) and len(photos_html) == 2:
                 albums_pair = photos_html
             else:
-                albums_pair = extract_xhamster_albums_lexbor(source_url, _to_lexbor_or_str(photos_html))
+                albums_pair = extract_portal_state_albums_lexbor(source_url, _to_lexbor_or_str(photos_html))
         else:
             albums_pair = root_info.get("albums") or ([], [])
 
@@ -593,13 +793,13 @@ def parse_profile_page(
             elif isinstance(gifs_html, list):
                 gifs_pair = (gifs_html, [])
             else:
-                shorts_res = extract_xhamster_shorts_lexbor(source_url, _to_lexbor_or_str(gifs_html))
+                shorts_res = extract_portal_state_shorts_lexbor(source_url, _to_lexbor_or_str(gifs_html))
                 if isinstance(shorts_res, tuple) and len(shorts_res) == 2:
                     gifs_pair = shorts_res
                 else:
                     gifs_pair = (shorts_res, [])
 
-        return assemble_eporner_profile(
+        return assemble_portal_grid_profile(
             source_url,
             root_info,
             video_batches,
@@ -609,24 +809,24 @@ def parse_profile_page(
             gifs_pair=gifs_pair,
         )
 
-    if is_eporner:
+    if is_portal_grid:
         if root_info is None:
-            root_info = extract_eporner_root_lexbor(source_url, root_tree)
+            root_info = extract_portal_grid_root_lexbor(source_url, root_tree)
 
         video_batches = []
         for item in extra_video_soups or []:
             if isinstance(item, tuple) and len(item) == 2:
                 video_batches.append(item)
             else:
-                video_batches.append(extract_eporner_videos_lexbor(source_url, _to_lexbor_or_str(item)))
+                video_batches.append(extract_portal_grid_videos_lexbor(source_url, _to_lexbor_or_str(item)))
 
         if photos_html is not None:
             if isinstance(photos_html, tuple) and len(photos_html) == 2:
                 albums_pair = photos_html
             else:
-                albums_pair = extract_eporner_albums_lexbor(source_url, _to_lexbor_or_str(photos_html))
+                albums_pair = extract_portal_grid_albums_lexbor(source_url, _to_lexbor_or_str(photos_html))
         else:
-            albums_pair = extract_eporner_albums_lexbor(source_url, root_tree) if root_tree is not None else ([], [])
+            albums_pair = extract_portal_grid_albums_lexbor(source_url, root_tree) if root_tree is not None else ([], [])
 
         playlist_batches = []
         pl_items = playlists_html if isinstance(playlists_html, list) else ([playlists_html] if playlists_html else [])
@@ -637,10 +837,10 @@ def parse_profile_page(
             if isinstance(ph, tuple) and len(ph) >= 2:
                 playlist_batches.append((ph[0], ph[1]))
             else:
-                c_pl, r_pl, _ = extract_eporner_playlists_lexbor(source_url, "", _to_lexbor_or_str(ph), avatar)
+                c_pl, r_pl, _ = extract_portal_grid_playlists_lexbor(source_url, "", _to_lexbor_or_str(ph), avatar)
                 playlist_batches.append((c_pl, r_pl))
 
-        return assemble_eporner_profile(
+        return assemble_portal_grid_profile(
             source_url,
             root_info,
             video_batches,

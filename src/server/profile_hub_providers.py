@@ -1,7 +1,7 @@
 """Extensible source provider registry and safe profile/creator routing.
 
-Centralizes known providers (YouTube, Eporner, Pornhub, xHamster) and a
-structural generic provider so new sources work cleanly across Watch View,
+Centralizes known public providers (YouTube) and generic descriptor-driven
+video/catalog/forum providers so sources work cleanly across Watch View,
 Artists, Source Comments, Directory, and Batch Avatar Hydration without
 hardcoded per-site branches scattered across modules.
 """
@@ -13,6 +13,12 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from typing import Callable
 
 
+from .connector_registry import (
+    CatalogDescriptor,
+    ForumDescriptor,
+    VideoPortalDescriptor,
+    find_connector_for_url,
+)
 from .profile_hub_execution import https_url
 
 _GENERIC_PROFILE_PATH_RE = re.compile(
@@ -38,6 +44,24 @@ _YOUTUBE_HANDLE_RE = re.compile(r"/(?:@[^/?#\s]+|channel/UC[A-Za-z0-9_-]{22}|(?:
 _YOUTUBE_CHANNEL_ID_RE = re.compile(r"UC[A-Za-z0-9_-]{22}")
 
 
+def match_ytdlp_video_id(url: str) -> str | None:
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        from yt_dlp.extractor import gen_extractors
+        for ie in gen_extractors():
+            if (getattr(ie, "IE_NAME", "") or "").lower() == "generic":
+                continue
+            try:
+                if ie.suitable(url):
+                    return ie._match_id(url)
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
 def _extractor_video_id(extractor_name, url):
     try:
         from yt_dlp.extractor import get_info_extractor
@@ -45,12 +69,6 @@ def _extractor_video_id(extractor_name, url):
         return extractor._match_id(url) if extractor.suitable(url) else None
     except (ValueError, AttributeError, KeyError):
         return None
-
-
-def _pornhub_video_id(url):
-    # This provider's existing source matcher also handles its short-video route.
-    from .profile_hub_comment_sources import PornhubCommentsSource
-    return PornhubCommentsSource.match_watch_identity(url)
 
 
 @dataclass(frozen=True)
@@ -66,6 +84,7 @@ class ProfileProviderSpec:
     profile_meta_fallback_allowed: bool = False
     max_html_bytes: int = 1536 * 1024
     video_identity_resolver: Callable[[str], str | None] | None = None
+    custom_path_matcher: Callable[[str], bool] | None = None
 
     def video_identity(self, url: str) -> str | None:
         return self.video_identity_resolver(url) if self.video_identity_resolver else None
@@ -74,8 +93,10 @@ class ProfileProviderSpec:
         h = host.lower().lstrip(".").removeprefix("www.").removeprefix("m.")
         if h in self.domains:
             return True
+        if any(h.endswith(f".{d}") for d in self.domains if d):
+            return True
         if any(h == p or h.startswith(f"{p}.") or h.startswith(p) and "." in h for p in self.domain_prefixes):
-            # Guard prefix match to label boundary like xhamster19.com -> label "xhamster..."
+            # Guard prefix match to label boundary (e.g. mirror subdomains/numbering)
             first_label = h.split(".", 1)[0]
             if any(first_label.startswith(p) for p in self.domain_prefixes):
                 return True
@@ -85,6 +106,8 @@ class ProfileProviderSpec:
 
     def allows_profile_path(self, path: str) -> bool:
         norm = path or "/"
+        if self.custom_path_matcher is not None:
+            return bool(self.custom_path_matcher(norm))
         if any(norm.lower().startswith(bad) for bad in _GENERIC_DENIED_PREFIXES):
             return False
         if self.profile_path_patterns:
@@ -94,8 +117,24 @@ class ProfileProviderSpec:
 
 GENERIC_PROVIDER = ProfileProviderSpec(
     provider_id="generic",
+    video_identity_resolver=match_ytdlp_video_id,
     profile_path_patterns=(_GENERIC_PROFILE_PATH_RE,),
+    avatar_selectors=(
+        "img#getAvatar",
+        "#avatarPicture img",
+        "img.chlogo",
+        ".pf-avatar img",
+        ".landing-info__logo-image",
+        "[class*=profile-avatar] img",
+        "img[class*=avatar]",
+    ),
+    avatar_bg_selectors=(".pf-avatar",),
+    confirmed_no_avatar_selectors=(
+        (".pf-avatar .pf-letter", ".pf-avatar img"),
+        "img#getAvatar[src*='/users/default/']",
+    ),
     profile_meta_fallback_allowed=True,
+    max_html_bytes=2 * 1024 * 1024,
 )
 
 _BUILTIN_PROVIDERS: tuple[ProfileProviderSpec, ...] = (
@@ -112,56 +151,62 @@ _BUILTIN_PROVIDERS: tuple[ProfileProviderSpec, ...] = (
         profile_meta_fallback_allowed=True,
         max_html_bytes=2 * 1024 * 1024,
     ),
-    ProfileProviderSpec(
-        provider_id="eporner",
-        video_identity_resolver=lambda url: _extractor_video_id('Eporner', url),
-        domains=("eporner.com",),
-        profile_path_patterns=(re.compile(r"/(?:profile|pornstar|channel)/[^/?#\s]+/?"),),
-        avatar_selectors=(
-            "img.chlogo",
-            "div[class*=psbio] img",
-            ".pf-avatar img",
-            "img[src*='/img/avatars/']",
-            "div.profile-img img",
-        ),
-        avatar_bg_selectors=(".pf-avatar",),
-        confirmed_no_avatar_selectors=((".pf-avatar .pf-letter", ".pf-avatar img"),),
-        profile_meta_fallback_allowed=False,
-    ),
-    ProfileProviderSpec(
-        provider_id="pornhub",
-        video_identity_resolver=_pornhub_video_id,
-        domains=("pornhub.com", "pornhub.net", "pornhub.org"),
-        domain_suffixes=(".pornhub.com", ".pornhub.net", ".pornhub.org"),
-        profile_path_patterns=(re.compile(r"/(?:pornstar|model|channels|users)/[^/?#\s]+/?"),),
-        avatar_selectors=(
-            "img#getAvatar",
-            "#avatarPicture img",
-            ".thumbImage img",
-            ".modelInfo img",
-            ".userAvatar img",
-            "img[class*=avatar]",
-        ),
-        confirmed_no_avatar_selectors=("img#getAvatar[src*='/users/default/']",),
-        profile_meta_fallback_allowed=False,
-        max_html_bytes=2 * 1024 * 1024,
-    ),
-    ProfileProviderSpec(
-        provider_id="xhamster",
-        video_identity_resolver=lambda url: _extractor_video_id('XHamster', url),
-        domains=("xhamster.com",),
-        domain_prefixes=("xhamster",),
-        profile_path_patterns=(re.compile(r"/(?:users/(?:profiles/)?|creators/|pornstars/|channels/)[^/?#\s]+/?"),),
-        avatar_selectors=(
-            ".landing-info__logo-image",
-            "[class*=profile-avatar] img",
-            "img[class*=avatar]",
-        ),
-        profile_meta_fallback_allowed=False,
-    ),
 )
 
 _REGISTRY: dict[str, ProfileProviderSpec] = {spec.provider_id: spec for spec in _BUILTIN_PROVIDERS}
+
+
+def _spec_from_connector(conn: CatalogDescriptor | ForumDescriptor | VideoPortalDescriptor) -> ProfileProviderSpec:
+    if isinstance(conn, VideoPortalDescriptor):
+        from .video_portal_engine import allows_portal_profile_path, extract_portal_video_id
+
+        base_host = (urlsplit(conn.effective_base_url()).hostname or "").lower()
+        clean_domains = tuple(
+            dict.fromkeys(
+                d.strip().lower().removeprefix("*.")
+                for d in (*conn.domains, base_host)
+                if d and d.strip()
+            )
+        )
+        return ProfileProviderSpec(
+            provider_id=conn.id,
+            domains=clean_domains,
+            domain_prefixes=conn.domain_patterns,
+            avatar_selectors=tuple(
+                conn.profile.get("avatarSelectors") or (".profile-pic img", "meta[property='og:image']")
+            ),
+            profile_meta_fallback_allowed=True,
+            video_identity_resolver=lambda url, _desc=conn: extract_portal_video_id(url, _desc),
+            custom_path_matcher=lambda path, _desc=conn: allows_portal_profile_path(path, _desc),
+        )
+    if isinstance(conn, ForumDescriptor):
+        return ProfileProviderSpec(
+            provider_id=conn.id,
+            domains=conn.domains,
+            domain_prefixes=conn.domain_patterns,
+            profile_path_patterns=(
+                re.compile(r"/(?:threads|forums|members)/[^/?#\s]+(?:/page\d+)?/?"),
+            ),
+            avatar_selectors=(".avatarcontainer img", ".userinfo img", "img.avatar"),
+            profile_meta_fallback_allowed=True,
+        )
+    return ProfileProviderSpec(
+        provider_id=conn.id,
+        domains=conn.domains,
+        domain_prefixes=conn.domain_patterns,
+        profile_path_patterns=(
+            re.compile(r"/(?:pornstars|models|channels|creators|artists|tags)/[^/?#\s]+/?"),
+            re.compile(r"/(?!popular(?:/|$)|recent(?:/|$)|rating(?:/|$)|likes(?:/|$)|views(?:/|$)|galleries/|pics/|search/|page/)[a-z0-9-]+/?"),
+        ),
+        avatar_selectors=(
+            ".model-info img",
+            ".channel-info img",
+            ".pornstar-info img",
+            ".artist-info img",
+            "img.avatar",
+        ),
+        profile_meta_fallback_allowed=True,
+    )
 
 
 def register_provider(spec: ProfileProviderSpec) -> None:
@@ -193,6 +238,9 @@ def resolve_provider(url: str | None) -> ProfileProviderSpec:
     for spec in _REGISTRY.values():
         if spec.matches_host(host):
             return spec
+    conn = find_connector_for_url(url)
+    if conn is not None:
+        return _spec_from_connector(conn)
     return GENERIC_PROVIDER
 
 
@@ -265,12 +313,16 @@ def normalize_source_author_url(record: dict, source_url: str) -> str | None:
     if parsed.query:
         return None
     target_host = _base_domain(parsed.hostname or "")
-    # Enforce same-owner host parity unless identical provider domain alias (e.g. rt.pornhub.com -> pornhub.com)
+    # Enforce same-owner host parity unless identical provider domain alias (e.g. locale subdomain -> apex)
     if owner_spec.provider_id == "generic":
         if target_host != owner_host:
             return None
     else:
-        if not owner_spec.matches_host(target_host):
+        owner_conn = find_connector_for_url(source_url)
+        if owner_conn is not None:
+            if not owner_conn.matches_host(target_host):
+                return None
+        elif not owner_spec.matches_host(target_host):
             return None
 
     if owner_spec.allows_profile_path(parsed.path):

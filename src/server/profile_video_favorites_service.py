@@ -38,7 +38,7 @@ def _matches_video(fav: Dict[str, Any], v_id: str, orig_url: str) -> bool:
     if orig_url and f_orig and (orig_url == f_orig or orig_url.rstrip("/") == f_orig.rstrip("/")):
         return True
 
-    # Check Pornhub viewkey match
+    # Check viewkey query parameter match
     m_vkey1 = re.search(r"viewkey=([a-zA-Z0-9]+)", orig_url)
     m_vkey2 = re.search(r"viewkey=([a-zA-Z0-9]+)", f_orig)
     if m_vkey1 and m_vkey2 and m_vkey1.group(1) == m_vkey2.group(1):

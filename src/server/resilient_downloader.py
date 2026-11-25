@@ -1,5 +1,5 @@
 """
-Resilient Video Downloader for ImageX AI Server.
+Resilient Video Downloader for IMAGEX Server.
 Features:
 - Dual-Engine Strategy: Direct HTTP Range streaming with automatic fallback to yt-dlp.
 - TLS/JA3 Browser Impersonation (Chrome) via curl-cffi to bypass HTTP 474 / Cloudflare / CDN protection.

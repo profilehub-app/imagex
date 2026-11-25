@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")"
 
 echo "=============================================================="
-echo "      IMAGEX.AI - Cross-Platform Verification & Build Tool"
+echo "      IMAGEX - Cross-Platform Verification & Build Tool"
 echo "=============================================================="
 echo ""
 

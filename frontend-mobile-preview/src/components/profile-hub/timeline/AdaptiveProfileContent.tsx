@@ -7,9 +7,14 @@ import {
   TimelinePlaylist,
   doesPostMatchCreator,
   buildTimelineStreamUrl,
+  mapPlaylistVideosToTimelinePosts,
   upgradePhotoUrlFast,
+  resolveTimelinePlatform,
 } from './timelineModel';
+import { getSourceCapabilities } from './timelineSourceCapabilities';
+import { CATALOG_MODE_LABELS, getTimelineSourceDisplayName, matchesCatalogMode } from './timelineSourceNavigation';
 import { timelinePlaybackRect, TimelinePlaybackHandoff, TimelinePostCard } from './TimelinePostCard';
+import { CategoryShowcaseCard, EditorialGalleryCard, ForumThreadRow } from './AdaptiveSourceCards';
 import { fetchPlaylistVideos } from '../../../services/profileHubApi';
 import { useProfileTimelineStore } from '../../../store/useProfileTimelineStore';
 import { useProfileHubLibraryStore } from '../../../store/useProfileHubLibraryStore';
@@ -20,7 +25,7 @@ import { handleProxiedImageError } from '../../../services/profileHubImageFallba
 interface AdaptiveProfileContentProps {
   creator: TimelineCreator;
   posts: TimelinePost[];
-  onOpenProfile: (creatorId: string) => void;
+  onOpenProfile: (creatorId: string, trigger?: HTMLElement) => void;
   onOpenComments: (postId: string) => void;
   onOpenLightbox: (
     images: string[],
@@ -35,6 +40,14 @@ interface AdaptiveProfileContentProps {
   activeTab?: string;
   onActiveTabChange?: (tab: string) => void;
   onOpenVideo?: (post: TimelinePost, handoff: TimelinePlaybackHandoff) => void;
+  onOpenEntity?: (
+    entity: { name: string; url?: string; kind?: string },
+    source?: string,
+    trigger?: HTMLElement
+  ) => void;
+  onOpenThread?: (post: TimelinePost) => void;
+  onLoadMoreProfile?: () => void;
+  isLoadingMoreProfile?: boolean;
 }
 
 // Match the main timeline: one extra viewport, one card until geometry is available.
@@ -52,6 +65,10 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   activeTab,
   onActiveTabChange,
   onOpenVideo,
+  onOpenEntity,
+  onOpenThread,
+  onLoadMoreProfile,
+  isLoadingMoreProfile = false,
 }) => {
   const isEn = useAppStore((state) => state.settings?.language === 'en-US');
   const libraryFavorites = useProfileHubLibraryStore((state) => state.favorites);
@@ -69,7 +86,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   };
   const { activeProfileTab: storedProfileTab, setActiveProfileTab: setStoredProfileTab, isDiscoveringCreator, activeAutoplayPostId } =
     useProfileTimelineStore();
-  const activeProfileTab = activeTab ?? storedProfileTab;
+  const requestedProfileTab = activeTab ?? storedProfileTab;
   const setActiveProfileTab = onActiveTabChange ?? setStoredProfileTab;
 
   const [activeVideoPostId, setActiveVideoPostId] = useState<string | null>(null);
@@ -109,7 +126,28 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   const isScanning = !!isDiscoveringCreator[creator.id];
 
   const creatorPosts = posts.filter((p) => doesPostMatchCreator(p, creator));
-  const videoPosts = creatorPosts.filter((p) => p.type === 'video');
+  const platform = resolveTimelinePlatform(creator.profileUrl, creator.site);
+  const sourceCaps = getSourceCapabilities(platform);
+  const socialPlatform = platform === 'x' || platform === 'instagram';
+  const allVideos = creatorPosts.filter(post => post.type === 'video');
+  const shortFormat = platform === 'instagram'
+    ? 'reels'
+    : (platform === 'youtube' || sourceCaps.archetype === 'video_portal' || allVideos.some((post) => post.isShort))
+      ? 'shorts'
+      : null;
+  const shortVideos = shortFormat ? allVideos.filter(post => matchesCatalogMode(post, shortFormat)) : [];
+  const regularVideos = shortFormat ? allVideos.filter(post => matchesCatalogMode(post, 'videos')) : allVideos;
+  const communityPosts = platform === 'youtube' ? creatorPosts.filter(post => matchesCatalogMode(post, 'community')) : [];
+  const hasVideosTab = sourceCaps.supportsVideosTab && (!socialPlatform || regularVideos.length > 0);
+  const unavailableTab = (requestedProfileTab === 'videos' && !hasVideosTab)
+    || (requestedProfileTab === 'community' && communityPosts.length === 0)
+    || ((requestedProfileTab === 'shorts' || requestedProfileTab === 'reels')
+      && (requestedProfileTab !== shortFormat || shortVideos.length === 0));
+  const activeProfileTab = unavailableTab ? 'timeline' : requestedProfileTab;
+  const showProfilePosts = activeProfileTab === 'timeline' || activeProfileTab === 'community';
+  const showProfileVideos = activeProfileTab === 'videos' || activeProfileTab === shortFormat;
+  const videoPosts = activeProfileTab === shortFormat ? shortVideos : regularVideos;
+  const profilePosts = activeProfileTab === 'community' ? communityPosts : creatorPosts;
   const albumPosts = creatorPosts.filter((p) => p.type === 'photo_grid' || p.type === 'album');
   const gifPosts = creatorPosts.filter((p) => p.type === 'gif');
   const creatorPlaylists: TimelinePlaylist[] = creator.playlists || [];
@@ -121,22 +159,22 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   const pinnedFeedPostRef = useRef<string | null>(null);
   const mountedFeedPostIdsRef = useRef(new Set<string>());
   const pendingFeedFocusRef = useRef<string | null>(null);
-  const feedWindowKey = creator.id;
+  const feedWindowKey = `${creator.id}:${activeProfileTab}`;
   const feedCount = feedWindow.key === feedWindowKey ? feedWindow.count : FEED_UNMEASURED_CARD_COUNT;
-  const activeIdx = creatorPosts.findIndex(post => post.id === activeAutoplayPostId);
+  const activeIdx = profilePosts.findIndex(post => post.id === activeAutoplayPostId);
   if (feedWindow.key === feedWindowKey && activeAutoplayPostId && activeIdx >= 0 &&
       (activeIdx < feedCount || mountedFeedPostIdsRef.current.has(activeAutoplayPostId))) {
     pinnedFeedPostRef.current = activeAutoplayPostId;
   }
   const pinnedFeedPostId = feedWindow.key === feedWindowKey ? pinnedFeedPostRef.current : null;
-  const renderedFeedPosts = creatorPosts.filter((post, index) => index < feedCount || post.id === pinnedFeedPostId);
-  const hasMoreFeedPosts = renderedFeedPosts.length < creatorPosts.length;
+  const renderedFeedPosts = profilePosts.filter((post, index) => index < feedCount || post.id === pinnedFeedPostId);
+  const hasMoreFeedPosts = renderedFeedPosts.length < profilePosts.length;
   const expandFeed = useCallback(() => {
     setFeedWindow(current => ({key: feedWindowKey, count: (current.key === feedWindowKey ? current.count : FEED_UNMEASURED_CARD_COUNT) + feedPageSize}));
   }, [feedWindowKey, feedPageSize]);
 
   useLayoutEffect(() => {
-    if (activeProfileTab === 'timeline') mountedFeedPostIdsRef.current = new Set(renderedFeedPosts.map(post => post.id));
+    if (showProfilePosts) mountedFeedPostIdsRef.current = new Set(renderedFeedPosts.map(post => post.id));
   });
 
   useLayoutEffect(() => {
@@ -148,7 +186,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   }, [feedWindowKey, feedWindow.key]);
 
   useLayoutEffect(() => {
-    if (suspended || activeProfileTab !== 'timeline') return;
+    if (suspended || !showProfilePosts) return;
     const list = feedListRef.current;
     const firstCard = list?.querySelector<HTMLElement>('[data-timeline-post-id]');
     const main = list?.closest('main');
@@ -172,7 +210,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   }, [suspended, activeProfileTab, feedWindowKey, renderedFeedPosts[0]?.id]);
 
   useEffect(() => {
-    if (suspended || activeProfileTab !== 'timeline' || !hasMoreFeedPosts) return;
+    if (suspended || !showProfilePosts || !hasMoreFeedPosts) return;
     const main = feedListRef.current?.closest('main');
     const sentinel = feedSentinelRef.current;
     if (!main || !sentinel) return;
@@ -215,7 +253,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   }, [suspended, activeProfileTab, hasMoreFeedPosts, expandFeed, feedCount]);
 
   useLayoutEffect(() => {
-    if (suspended || activeProfileTab !== 'timeline') return;
+    if (suspended || !showProfilePosts) return;
     const id = pendingFeedFocusRef.current;
     if (!id) return;
     const card = Array.from(feedListRef.current?.querySelectorAll<HTMLElement>('[data-timeline-post-id]') || []).find(element => element.dataset.timelinePostId === id);
@@ -253,16 +291,28 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   const tabs = [
     {
       id: 'timeline',
-      label: isEn ? 'Timeline' : 'Linha do Tempo',
+      label: socialPlatform ? (isEn ? 'Posts' : 'Publicações') : (isEn ? 'Timeline' : 'Linha do Tempo'),
       count: creatorPosts.length,
       icon: <Menu className="w-3.5 h-3.5" />,
     },
-    {
+    ...(hasVideosTab ? [{
       id: 'videos',
       label: isEn ? 'Videos' : 'Vídeos',
-      count: videoPosts.length,
+      count: regularVideos.length,
       icon: <Film className="w-3.5 h-3.5" />,
-    },
+    }] : []),
+    ...(shortFormat && shortVideos.length > 0 ? [{
+      id: shortFormat,
+      label: CATALOG_MODE_LABELS[shortFormat][isEn ? 'en' : 'pt'],
+      count: shortVideos.length,
+      icon: <Play className="w-3.5 h-3.5" />,
+    }] : []),
+    ...(communityPosts.length > 0 ? [{
+      id: 'community',
+      label: CATALOG_MODE_LABELS.community[isEn ? 'en' : 'pt'],
+      count: communityPosts.length,
+      icon: <Menu className="w-3.5 h-3.5" />,
+    }] : []),
     ...(creatorPlaylists.length > 0
       ? [
           {
@@ -277,7 +327,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
       ? [
           {
             id: 'albums',
-            label: isEn ? 'Photos / Albums' : 'Ensaios / Álbuns',
+            label: socialPlatform ? (isEn ? 'Photos' : 'Fotos') : (isEn ? 'Photos / Albums' : 'Ensaios / Álbuns'),
             count: albumPosts.length,
             icon: <Images className="w-3.5 h-3.5" />,
           },
@@ -324,36 +374,12 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
       const res = await fetchPlaylistVideos(playlist.url, controller.signal);
       if (controller.signal.aborted || playlistRequestRef.current !== controller) return;
       if (res.metadataStatus === 'error' && !res.videos?.length) throw new Error('playlist-source-error');
-      const mapped: TimelinePost[] = (res.videos || []).map((v, vIdx) => {
-          const vUrl = (v.originalUrl || v.pageUrl || (v as any).url || '').trim();
-          let ytId: string | undefined;
-          if (vUrl.includes('youtube.com/watch') || vUrl.includes('youtu.be/')) {
-            const m = vUrl.match(/[?&]v=([A-Za-z0-9_-]{11})/) || vUrl.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
-            if (m) ytId = m[1];
-          }
-          const stream = buildTimelineStreamUrl(v.streamUrl || vUrl, vUrl, undefined, ytId);
-          return {
-            id: `pl-vid-${playlist.id}-${v.id || vIdx}`,
-            creatorId: creator.id,
-            creatorName: creator.name,
-            creatorHandle: creator.handle,
-            creatorAvatar: creator.avatar,
-            type: 'video',
-            source: creator.site || 'generic',
-            youtubeId: ytId,
-            videoUrl: stream,
-            originalUrl: vUrl || undefined,
-            previewVideoUrl: (v as any).previewVideoUrl || undefined,
-            thumbnail: v.thumbnailUrl || creator.avatar,
-            title: v.title || `${playlist.title} - ${isEn ? 'Video' : 'Vídeo'} ${vIdx + 1}`,
-            duration: v.duration || undefined,
-            views: v.views || undefined,
-            resolution: v.resolution || undefined,
-            comments: [],
-            likes: null,
-            date: v.timeAgo || v.uploadedAt || '',
-          };
-      });
+      const mapped = mapPlaylistVideosToTimelinePosts(
+        { id: playlist.id, title: playlist.title, url: playlist.url },
+        creator,
+        res.videos || [],
+        isEn,
+      );
       setPlaylistVideosMap((prev) => ({ ...prev, [playlist.id]: mapped }));
     } catch {
       if (!controller.signal.aborted && playlistRequestRef.current === controller) {
@@ -376,6 +402,8 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
           return (
             <button
               key={tab.id}
+              type="button"
+              aria-pressed={isActive}
               data-profile-tab={tab.id}
               onClick={() => {
                 if (tab.id !== 'playlists') {
@@ -386,7 +414,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
                 setActiveProfileTab(tab.id);
                 setActiveVideoPostId(null);
               }}
-              className={`flex items-center gap-2 py-2 px-3 border-b-2 font-bold text-xs whitespace-nowrap transition-all ${
+              className={`flex min-h-11 items-center gap-2 py-2 px-3 border-b-2 font-bold text-xs whitespace-nowrap transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--tl-accent-hover)] ${
                 isActive
                   ? 'border-[var(--tl-accent)] text-[var(--tl-accent-text)]'
                   : 'border-transparent text-[var(--tl-text-muted)] hover:text-[var(--tl-text-primary)]'
@@ -412,11 +440,86 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
         )}
       </div>
 
+      {Array.isArray(creator.relatedEntities) && creator.relatedEntities.length > 0 && (
+        <div className="px-3.5 sm:px-0 flex flex-wrap items-center gap-2" data-profile-related-entities>
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--tl-text-muted)]">
+            {isEn ? 'Related:' : 'Relacionados:'}
+          </span>
+          {creator.relatedEntities.map((entity) => (
+            <button
+              key={`${entity.kind || 'entity'}-${entity.url || entity.name}`}
+              type="button"
+              onClick={(e) => {
+                if (onOpenEntity) {
+                  onOpenEntity(entity, platform || creator.site, e.currentTarget);
+                } else if (entity.url) {
+                  onOpenProfile(entity.url);
+                }
+              }}
+              className="tl-entity-chip"
+            >
+              <span>{entity.name}</span>
+              {typeof entity.count === 'number' && entity.count > 0 && (
+                <span className="text-[10px] opacity-75">({entity.count})</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Conteúdo da Aba: Linha do Tempo */}
-      {activeProfileTab === 'timeline' && (
-        <div ref={feedListRef} className="space-y-3.5">
+      {showProfilePosts && (
+        <div
+          ref={feedListRef}
+          data-profile-layout-mode={sourceCaps.layoutMode}
+          className={
+            sourceCaps.layoutMode === 'editorial_wall'
+              ? 'tl-editorial-wall-grid'
+              : sourceCaps.layoutMode === 'category_showcase'
+                ? 'tl-category-showcase-grid'
+                : sourceCaps.layoutMode === 'forum_index'
+                  ? 'tl-forum-thread-list'
+                  : 'space-y-3.5'
+          }
+        >
           {renderedFeedPosts.map((post) => {
-            const isNext = activeIdx !== -1 && post.id === creatorPosts[activeIdx + 1]?.id;
+            if (sourceCaps.layoutMode === 'editorial_wall') {
+              return (
+                <EditorialGalleryCard
+                  key={post.id}
+                  post={post}
+                  sourceLabel={getTimelineSourceDisplayName(platform || creator.site || 'generic', isEn ? 'en' : 'pt')}
+                  isEn={isEn}
+                  onOpenLightbox={onOpenLightbox}
+                  onOpenEntity={onOpenEntity}
+                />
+              );
+            }
+            if (sourceCaps.layoutMode === 'category_showcase') {
+              return (
+                <CategoryShowcaseCard
+                  key={post.id}
+                  post={post}
+                  sourceLabel={getTimelineSourceDisplayName(platform || creator.site || 'generic', isEn ? 'en' : 'pt')}
+                  isEn={isEn}
+                  onOpenLightbox={onOpenLightbox}
+                  onOpenEntity={onOpenEntity}
+                />
+              );
+            }
+            if (sourceCaps.layoutMode === 'forum_index' && onOpenThread) {
+              return (
+                <ForumThreadRow
+                  key={post.id}
+                  post={post}
+                  isEn={isEn}
+                  onOpenThread={onOpenThread}
+                  onOpenLightbox={onOpenLightbox}
+                  onOpenEntity={onOpenEntity}
+                />
+              );
+            }
+            const isNext = activeIdx !== -1 && post.id === profilePosts[activeIdx + 1]?.id;
             return (
               <TimelinePostCard
                 suspended={suspended}
@@ -424,6 +527,8 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
                 key={post.id}
                 post={post}
                 onOpenProfile={onOpenProfile}
+                onOpenEntity={onOpenEntity}
+                onOpenThread={onOpenThread}
                 onOpenComments={onOpenComments}
                 onOpenLightbox={onOpenLightbox}
                 isDesktop={isDesktop}
@@ -435,7 +540,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
             <button
               type="button"
               onClick={() => {
-                pendingFeedFocusRef.current = creatorPosts.find((post, index) => index >= feedCount && post.id !== pinnedFeedPostId)?.id || null;
+                pendingFeedFocusRef.current = profilePosts.find((post, index) => index >= feedCount && post.id !== pinnedFeedPostId)?.id || null;
                 expandFeed();
               }}
               style={{ boxShadow: '0 10px 24px -6px var(--tl-accent-shadow)' }}
@@ -445,11 +550,25 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
             </button>
             <div ref={feedSentinelRef} className="h-4 w-full pointer-events-none" aria-hidden="true" />
           </div>}
+          {!hasMoreFeedPosts && creator.profileHasMore && onLoadMoreProfile && (
+            <div className="pt-2 pb-6 flex justify-center">
+              <button
+                type="button"
+                data-load-more-profile-albums
+                disabled={isLoadingMoreProfile}
+                onClick={onLoadMoreProfile}
+                className="min-h-11 px-5 py-2.5 rounded-xl border border-[var(--tl-accent-border)] bg-[var(--tl-accent-soft)] hover:bg-[var(--tl-accent-soft-hover)] text-[var(--tl-accent-text-strong)] font-bold text-xs sm:text-sm flex items-center gap-2 disabled:opacity-60"
+              >
+                {isLoadingMoreProfile && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{isEn ? 'Load more from source' : 'Carregar mais da origem'}</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {/* Conteúdo da Aba: Vídeos */}
-      {activeProfileTab === 'videos' && (
+      {showProfileVideos && (
         <div className="space-y-3">
           {activeVideoPost && (
             <div ref={activePlayerRef} data-active-profile-player className="relative mb-3 animate-in fade-in-50 duration-200">
@@ -591,6 +710,20 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+          {creator.profileHasMore && onLoadMoreProfile && (
+            <div className="pt-2 pb-4 flex justify-center">
+              <button
+                type="button"
+                data-load-more-profile-albums
+                disabled={isLoadingMoreProfile}
+                onClick={onLoadMoreProfile}
+                className="min-h-11 px-5 py-2.5 rounded-xl border border-[var(--tl-accent-border)] bg-[var(--tl-accent-soft)] hover:bg-[var(--tl-accent-soft-hover)] text-[var(--tl-accent-text-strong)] font-bold text-xs sm:text-sm flex items-center gap-2 disabled:opacity-60"
+              >
+                {isLoadingMoreProfile && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{isEn ? 'Load more from source' : 'Carregar mais da origem'}</span>
+              </button>
             </div>
           )}
         </div>
@@ -980,6 +1113,20 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+          {creator.profileHasMore && onLoadMoreProfile && (
+            <div className="pt-4 pb-6 flex justify-center">
+              <button
+                type="button"
+                data-load-more-profile-albums
+                disabled={isLoadingMoreProfile}
+                onClick={onLoadMoreProfile}
+                className="min-h-11 px-5 py-2.5 rounded-xl border border-[var(--tl-accent-border)] bg-[var(--tl-accent-soft)] hover:bg-[var(--tl-accent-soft-hover)] text-[var(--tl-accent-text-strong)] font-bold text-xs sm:text-sm flex items-center gap-2 disabled:opacity-60"
+              >
+                {isLoadingMoreProfile && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{isEn ? 'Load more from source' : 'Carregar mais da origem'}</span>
+              </button>
             </div>
           )}
         </>

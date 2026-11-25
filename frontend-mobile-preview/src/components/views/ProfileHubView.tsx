@@ -514,9 +514,18 @@ export const ProfileHubView: React.FC<{ active?: boolean }> = React.memo(({ acti
   };
 
   // Media Viewing Handlers
+  const resolveOriginReferer = (candidateUrl?: string) => {
+    try {
+      const target = candidateUrl || (profile as any)?.url || (profile as any)?.sourceUrl;
+      return target ? `${new URL(target).origin}/` : '';
+    } catch {
+      return '';
+    }
+  };
   const handlePlayVideo = (video: MediaItemCard) => {
     const isFav = favoriteVideoIds.includes(video.id) || !!video.isFavorite;
-    const safeStream = video.streamUrl || (video.originalUrl ? `/api/proxy-video-stream?url=${encodeURIComponent(video.originalUrl)}&referer=https://www.pornhub.com/` : "");
+    const ref = resolveOriginReferer(video.sourcePage || video.originalUrl);
+    const safeStream = video.streamUrl || (video.originalUrl ? `/api/proxy-video-stream?url=${encodeURIComponent(video.originalUrl)}${ref ? `&referer=${encodeURIComponent(ref)}` : ''}` : "");
     setActivePlayingVideo({
       id: video.id,
       title: video.title,
@@ -555,12 +564,12 @@ export const ProfileHubView: React.FC<{ active?: boolean }> = React.memo(({ acti
       totalSizeBytes: items.reduce((sum, item) => sum + (item.fileSizeBytes ?? 0), 0),
       coverImage: photo.thumbnailUrl,
       images: items.map(p => {
-        const isPh = Boolean((p.sourcePage && p.sourcePage.includes('pornhub.com')) || (p.originalUrl && p.originalUrl.includes('phncdn.com')));
+        const ref = resolveOriginReferer(p.sourcePage || p.originalUrl);
         const safeMedia = p.streamUrl || (
-          isPh && p.originalUrl
+          p.originalUrl && ref && !p.originalUrl.startsWith('/api/')
             ? (p.format === 'mp4' || p.originalUrl.includes('.mp4')
-                ? `/api/proxy-video-stream?url=${encodeURIComponent(p.originalUrl)}&referer=https://www.pornhub.com/`
-                : `/api/proxy-image?url=${encodeURIComponent(p.originalUrl)}&referer=https://www.pornhub.com/`)
+                ? `/api/proxy-video-stream?url=${encodeURIComponent(p.originalUrl)}&referer=${encodeURIComponent(ref)}`
+                : `/api/proxy-image?url=${encodeURIComponent(p.originalUrl)}&referer=${encodeURIComponent(ref)}`)
             : (p.originalUrl || p.thumbnailUrl)
         );
         const isVid = p.format === 'mp4' || safeMedia.includes('proxy-video-stream') || p.type === 'video';
@@ -1229,10 +1238,10 @@ export const ProfileHubView: React.FC<{ active?: boolean }> = React.memo(({ acti
               className="pd-button pd-favorites-button"
               onClick={() => setDialog('favorites')}
             >
-              <Heart size={15} className={libraryFavorites.length > 0 ? "fill-pink-500 text-pink-400" : "text-pink-400"} />
+              <Heart size={15} className={libraryFavorites.length > 0 ? 'fill-current' : undefined} />
               <span>{directoryCopy.favorites}</span>
               {libraryFavorites.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-pink-500/20 text-pink-300 text-[10px] font-bold">
+                <span className="pd-favorites-count px-1.5 py-0.2 rounded-full text-[10px] font-bold">
                   {libraryFavorites.length}
                 </span>
               )}
@@ -1282,7 +1291,7 @@ export const ProfileHubView: React.FC<{ active?: boolean }> = React.memo(({ acti
       {navigationUnavailable && <p role="alert" className="text-sm text-rose-300 mb-4">{copy.navigationUnavailable}</p>}
       {/* Notifications / Alerts */}
       {!isDirectory && !isReview && scanMessage && (
-        <div role="status" className="pd-hub-message max-w-[1900px] mx-auto mb-4 p-3 rounded-xl bg-purple-950/60 border border-purple-500/40 text-purple-200 text-xs sm:text-sm flex items-center justify-between animate-in fade-in">
+        <div role="status" className="pd-hub-message max-w-[1900px] mx-auto mb-4 p-3 rounded-xl text-xs sm:text-sm flex items-center justify-between animate-in fade-in">
           <span>{scanMessage}</span>
           <button type="button" aria-label={directoryCopy.close} onClick={() => setScanMessage('')}><X size={15} /></button>
         </div>

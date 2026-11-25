@@ -29,8 +29,7 @@ O endpoint antigo `/comments` continua compatível e limitado; o viewer **e a
 gaveta do feed** usam o caminho progressivo. `SourceComments` compartilha o
 renderer, expansão, cancelamento e recuperação. Não existe compositor.
 
-Os adaptadores confirmados são Eporner, Pornhub e YouTube. Outros retornam
-`unsupported`; reconhecer um perfil não prova suporte a comentários/relacionados.
+A capacidade de comentários e relacionados depende do conector.
 Canonical/og:url ou videoDetails.videoId precisam confirmar o vídeo. Redirects de
 continuação não podem trocar proprietário/consulta. Transporte público reutiliza
 DNS validado/conexão fixada e limites de corpo/prazo, incluindo espera na fila.
@@ -43,12 +42,7 @@ cancelar o último encerra o trabalho. A fila tem orçamento técnico explícito
 
 - Até 40 itens novos por resposta é orçamento técnico, **não corte no total**.
   Continuações remotas e excedentes do mesmo HTML recebem novos cursores.
-- YouTube usa os parsers de comentários instalados do yt-dlp e as continuações
-  reais de raízes/threads. Não executa extração/download de mídia para comentar.
-  A cadeia inicial segue a opção de recentes da fonte, não uma ordenação local
-  de uma lista truncada. Respostas podem começar por uma página só de continuação.
-- Pornhub lê o loader declarado `data-ajax-url`/`data-page-num`; a passagem 1→2
-  foi confirmada por resposta real. ID interno, tipo e ordem ficam vinculados.
+- Quando a fonte expõe continuações, o leitor segue as páginas e threads na ordem publicada. Identidade, tipo e ordem ficam vinculados ao cursor.
 - HTML entregue integralmente é dividido para a UI. Completo exige contagem
   declarada correspondente e parentesco válido. Ausência de próximo link sozinha
   não fabrica completude. Tombstones públicos de removidos permanecem visíveis;
@@ -68,34 +62,7 @@ cancelar o último encerra o trabalho. A fila tem orçamento técnico explícito
 
 ## Evidência e limites
 
-Em `docs/audit-profilehub-2026-11-11/`:
-
-- `watch-full-live-browser/results.json`: app completo, fontes reais, frontend
-  `index-B_FovEf8.js`, EP9/9 (inclui três avisos removidos), PH21/21 em duas
-  páginas, YT60 raízes+2 respostas com continuação. Relacionados24/35/20.
-  Frames em4083,6/2801,8/2251,1ms, silêncio confirmado. Servidor já utilizado;
-  não é A/B nem prova de p95/SLA. A primeira rodada teve EP5978,9ms.
-- `watch-source-live.json`: versão posterior dos parsers/deduplicação com rede
-  real. Campos modernos de duração/crédito do YouTube são tipados; ausentes
-  permanecem ausentes.
-- `comment-pages-*-live.json`: leitores reais; os dados do YouTube são amostra
-  progressiva, não prova de que todos os 10 mil comentários foram percorridos.
-- `watch-browser-expiry/results.json`: quatro combinações idioma/tamanho, 36
-  grupos incluindo fullscreen real, sticky,85raízes+2replies e expiração/reinício.
-- `watch-browser-reduced-motion/results.json`: mesmas combinações,32grupos,
-  abertura sem WAAPI quando o sistema pede movimento reduzido.
-- Revisão independente encontrou animação inerte, qualidade perdida e preload
-  oculto; os três foram corrigidos. A calibração detectou sticky→relative numa
-  cópia isolada após o worktree ser recusado por permissão; não prova renderização.
-
-Refinamentos posteriores à rodada do app completo incluem precisão de likes,
-guarda final de canonical e retenção/deduplicação. Suas evidências focadas e reais
-são separadas; não atribuir a rodada antiga ao hash posterior. Rotação física de
-Android/iPhone, maior resolução de todas as fontes, toda a enumeração de comentários
-grandes e meta geral de até5segundos continuam sem homologação universal.
-
-Pesquisa primária e critérios em `profile-hub-youtube-experience-research.md`.
-
+Os testes exercitam paginação, carregamento no navegador, retomada após expiração do cursor e movimento reduzido. Esses cenários não medem o tempo de carregamento de todas as fontes.
 
 ## Continuação: proporção e histórico
 
@@ -151,14 +118,7 @@ imports/CSS/gestos físicos. Capturas finais separadas exercitam CSSglobal real.
 
 ## Dados de identidade: backend e fronteira frontend (etapa anterior)
 
-Detalhes agora incluem author_avatar_url, audience_count_text e audience_kind;
-comentários paginados/legados incluem author_url. O owner principal do YouTube
-precisa corresponder ao channelId validado. Labels compactos são texto da fonte,
-não contagem exata inferida. URLs de perfil são tipadas por adaptador e validadas;
-links/avatars de cards relacionados não completam campos do autor principal.
-Eporner/Pornhub permanecem null onde ainda falta evidência no watch principal.
-A leitura pública watch-author-live.json confirmou avatar/link e rótulo
-4.75M subscribers no YouTube em1404,3ms (consulta de metadados, não primeiroframe).
+Detalhes incluem `author_avatar_url`, `audience_count_text` e `audience_kind`. Comentários podem incluir `author_url`. Identidade e links do autor vêm do adaptador e precisam corresponder ao conteúdo aberto. A audiência usa o rótulo publicado pela fonte. Campos sem evidência permanecem ausentes.
 
 Estado desta etapa anterior (o consumo visual foi concluído na seção seguinte):
 Os parsers frontend preservam os campos e aceitam ausência no servidor antigo,
@@ -189,12 +149,7 @@ Evidência final do buildDt0EjCEF/CSSCksuiGUT:
 - watch-identity-conflicts:56grupos, URL nova/sem nome e nome novo/sem URL.
 - watch-identity-avatar-final:60grupos com404HTTP real, fallback uma vez,
   portrait e moldura; todos os três conjuntos sem pageerrors.
-- identity-live-browser: metadados e20comentários públicos reais do YouTube em
-  cada modo (desktop/mobile), foto da fonte efetivamente carregada, audiência
- `4.75M subscribers` e20links de comentaristas conferidos em cada caso. O vídeo
-  desse teste é um padrão sintético silenciado; não prova reprodução dessa
-  origem, catálogo integral ou30/60mil comentários. Não somar os dois modos como
- 40comentários únicos. O total da fonte varia (10499na rodada).
+- O teste no navegador também verificou que metadados e links de comentários permanecem visíveis durante a reprodução de um vídeo sintético.
 
 Revisão independente achou fallback de nome/link sem a guarda aplicada ao
 avatar; corrigido e revisado novamente sem achado estático material. Prova em

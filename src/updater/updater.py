@@ -61,6 +61,12 @@ def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
+DEFAULT_GITHUB_REPO = "profilehub-app/imagex"
+_GITHUB_REPO_RE = re.compile(
+    r"^[a-zA-Z0-9](?:[a-zA-Z0-9._\-]*[a-zA-Z0-9])?/[a-zA-Z0-9](?:[a-zA-Z0-9._\-]*[a-zA-Z0-9])?$"
+)
+
+
 def get_repo_name() -> str:
     """Extracts GitHub owner/repo from git remote or falls back to default repository."""
     if not is_frozen():
@@ -77,7 +83,15 @@ def get_repo_name() -> str:
                 return f"{m.group(1)}/{m.group(2)}"
         except Exception:
             pass
-    return "jardieljw/album-agent"
+    env_repo = (os.environ.get("IMAGEX_GITHUB_REPO") or "").strip()
+    if (
+        env_repo
+        and ".." not in env_repo
+        and not env_repo.lower().endswith(".git")
+        and _GITHUB_REPO_RE.match(env_repo)
+    ):
+        return env_repo
+    return DEFAULT_GITHUB_REPO
 
 
 def is_git_repo() -> bool:

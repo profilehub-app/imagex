@@ -24,6 +24,101 @@ interface PhotoSwipeSession {
   intent: PhotoSwipeIntent;
 }
 
+export function buildProxyImageUrl(targetUrl: string, refererUrl?: string): string {
+  return `/api/proxy-image?url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(refererUrl || targetUrl)}`;
+}
+
+export function resolveLightboxDisplaySrc(
+  currentImage: string,
+  refererUrl?: string,
+  requiresProxy?: boolean
+): string {
+  if (!currentImage) return '';
+  if (requiresProxy && currentImage.startsWith('http')) {
+    return buildProxyImageUrl(currentImage, refererUrl);
+  }
+  return currentImage;
+}
+
+export function getNextLightboxErrorSrc(
+  currentImage: string,
+  fallbackThumb: string,
+  refererUrl: string,
+  state: { proxied?: string; fallbackThumb?: string }
+): { kind: 'proxy' | 'thumb' | 'thumb-proxy' | 'none'; src: string } {
+  if (!state.proxied && currentImage.startsWith('http')) {
+    return {
+      kind: 'proxy',
+      src: buildProxyImageUrl(currentImage, refererUrl),
+    };
+  }
+  if (!state.fallbackThumb && fallbackThumb && fallbackThumb !== currentImage) {
+    return {
+      kind: 'thumb',
+      src: fallbackThumb,
+    };
+  }
+  if (fallbackThumb && !state.fallbackThumb?.includes('proxied') && fallbackThumb.startsWith('http')) {
+    return {
+      kind: 'thumb-proxy',
+      src: buildProxyImageUrl(fallbackThumb, refererUrl),
+    };
+  }
+  return { kind: 'none', src: '' };
+}
+
+export const PhotoLightboxPaginationBar: React.FC<{
+  title?: string;
+  albumPage?: number;
+  albumTotalPages?: number;
+  albumHasMore?: boolean;
+  isLoadingMoreAlbumPages?: boolean;
+  isEn: boolean;
+  onLoadNext: () => void;
+}> = ({
+  title,
+  albumPage = 1,
+  albumTotalPages = 1,
+  albumHasMore = false,
+  isLoadingMoreAlbumPages = false,
+  isEn,
+  onLoadNext,
+}) => {
+  if (!title && !albumHasMore) return null;
+  return (
+    <div
+      className="absolute bottom-4 inset-x-0 mx-auto max-w-xl text-center px-4 flex flex-col sm:flex-row items-center justify-center gap-2 z-10"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {title && (
+        <p className="text-xs text-gray-300 bg-black/70 px-4 py-2 rounded-full border border-white/10 backdrop-blur-md line-clamp-1 inline-block">
+          {title}
+        </p>
+      )}
+      {albumHasMore && (
+        <button
+          type="button"
+          data-lightbox-load-next-page="true"
+          disabled={Boolean(isLoadingMoreAlbumPages)}
+          onClick={onLoadNext}
+          className="min-h-11 inline-flex items-center gap-2 rounded-full bg-[var(--tl-accent)] hover:bg-[var(--tl-accent-hover)] disabled:opacity-60 px-4 py-2 text-xs font-bold text-[var(--tl-accent-contrast)] shadow-lg transition-colors"
+        >
+          {isLoadingMoreAlbumPages && (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          )}
+          <span>
+            {typeof albumTotalPages === 'number' && albumTotalPages > 1
+              ? (isEn
+                  ? `Load Page ${(albumPage || 1) + 1} / ${albumTotalPages}`
+                  : `Carregar página ${(albumPage || 1) + 1} de ${albumTotalPages}`)
+              : (isEn ? 'Load Next Thread Page' : 'Carregar próxima página')}
+          </span>
+        </button>
+      )}
+    </div>
+  );
+};
+
 interface PhotoLightboxModalProps {
   lightbox: TimelineLightboxState;
   onClose: () => void;
@@ -44,6 +139,9 @@ export const PhotoLightboxModal: React.FC<PhotoLightboxModalProps> = ({
   const animationSpeed = useAppStore((state) => state.settings.animationSpeed);
   const updateLightboxItemResolution = useProfileTimelineStore(
     (state) => state.updateLightboxItemResolution
+  );
+  const loadNextAlbumPage = useProfileTimelineStore(
+    (state) => state.loadNextAlbumPage
   );
   const [isResolvingHd, setIsResolvingHd] = useState(false);
 
@@ -215,6 +313,7 @@ export const PhotoLightboxModal: React.FC<PhotoLightboxModalProps> = ({
             height: res.height || undefined,
             fileSizeBytes: res.file_size || undefined,
             format: res.format || undefined,
+            requiresProxy: Boolean(res.requires_proxy),
           });
         }
       })
@@ -308,6 +407,14 @@ export const PhotoLightboxModal: React.FC<PhotoLightboxModalProps> = ({
         <span data-lightbox-counter className="font-semibold">
           {lightbox.images.length ? lightbox.currentIndex + 1 : 0} / {lightbox.images.length}
         </span>
+        {typeof lightbox.albumTotalPages === 'number' && lightbox.albumTotalPages > 1 && (
+          <>
+            <span className="text-gray-500">•</span>
+            <span className="text-[10px] text-emerald-400 font-mono" data-lightbox-page-indicator>
+              Pg {lightbox.albumPage || 1}/{lightbox.albumTotalPages}
+            </span>
+          </>
+        )}
         {currentItem?.width && currentItem?.height ? (
           <>
             <span className="text-gray-500">•</span>
@@ -374,7 +481,7 @@ export const PhotoLightboxModal: React.FC<PhotoLightboxModalProps> = ({
           <img
             ref={photoRef}
             key={`${motionKey}:${currentImage}`}
-            src={currentImage}
+            src={resolveLightboxDisplaySrc(currentImage, refererUrl, currentItem?.requiresProxy)}
             alt={lightbox.title || `${isEn ? 'Photo' : 'Foto'} ${lightbox.currentIndex + 1}`}
             referrerPolicy="no-referrer"
             {...{ fetchpriority: 'high' }}
@@ -382,18 +489,27 @@ export const PhotoLightboxModal: React.FC<PhotoLightboxModalProps> = ({
             onError={(e) => {
               const imgEl = e.currentTarget as HTMLImageElement;
               const fallbackThumb = currentItem?.thumbnailUrl || '';
-              if (
-                !imgEl.dataset.fallbackThumb &&
-                fallbackThumb &&
-                imgEl.src !== fallbackThumb
-              ) {
-                imgEl.dataset.fallbackThumb = '1';
-                imgEl.src = fallbackThumb;
-              } else if (!imgEl.dataset.proxied && currentImage.startsWith('http')) {
+              if (currentItem?.requiresProxy && !imgEl.dataset.proxied) {
                 imgEl.dataset.proxied = '1';
-                imgEl.src = `/api/proxy-image?url=${encodeURIComponent(
-                  fallbackThumb || currentImage
-                )}&referer=${encodeURIComponent(refererUrl || currentImage)}`;
+              }
+              const nextStep = getNextLightboxErrorSrc(
+                currentImage,
+                fallbackThumb,
+                refererUrl,
+                {
+                  proxied: imgEl.dataset.proxied,
+                  fallbackThumb: imgEl.dataset.fallbackThumb,
+                }
+              );
+              if (nextStep.kind === 'proxy') {
+                imgEl.dataset.proxied = '1';
+                imgEl.src = nextStep.src;
+              } else if (nextStep.kind === 'thumb') {
+                imgEl.dataset.fallbackThumb = '1';
+                imgEl.src = nextStep.src;
+              } else if (nextStep.kind === 'thumb-proxy') {
+                imgEl.dataset.fallbackThumb = 'proxied';
+                imgEl.src = nextStep.src;
               }
             }}
           />
@@ -414,14 +530,16 @@ export const PhotoLightboxModal: React.FC<PhotoLightboxModalProps> = ({
         </button>
       )}
 
-      {/* Título Inferior */}
-      {lightbox.title && (
-        <div className="absolute bottom-4 inset-x-0 mx-auto max-w-xl text-center px-4">
-          <p className="text-xs text-gray-300 bg-black/70 px-4 py-2 rounded-full border border-white/10 backdrop-blur-md line-clamp-1 inline-block">
-            {lightbox.title}
-          </p>
-        </div>
-      )}
+      {/* Título Inferior e Paginação Multi-Página */}
+      <PhotoLightboxPaginationBar
+        title={lightbox.title}
+        albumPage={lightbox.albumPage}
+        albumTotalPages={lightbox.albumTotalPages}
+        albumHasMore={lightbox.albumHasMore}
+        isLoadingMoreAlbumPages={lightbox.isLoadingMoreAlbumPages}
+        isEn={isEn}
+        onLoadNext={() => void loadNextAlbumPage()}
+      />
     </div>
     </AppDialog>
   );

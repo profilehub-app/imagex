@@ -126,9 +126,9 @@ def _merge_context_query(base: str, href: str) -> str:
     return urlunsplit((joined_parts.scheme, joined_parts.netloc, joined_parts.path, query, ""))
 
 
-class EpornerDirectoryAdapter:
-    adapter_id = "eporner"
-    hosts = frozenset({"eporner.com", "www.eporner.com"})
+class PortalGridDirectoryAdapter:
+    adapter_id = "portal_grid"
+    hosts = frozenset({"portal-grid.example", "www.portal-grid.example"})
     directory_path = re.compile(
         r"/pornstar-list(?:/(?P<category>female|male))?"
         r"(?:/(?P<letter>[A-Z]))?(?:/(?P<page>[1-9][0-9]{0,5}))?/?\Z"
@@ -184,7 +184,7 @@ class EpornerDirectoryAdapter:
             if match and match["page"] == "1":
                 path = path[:-2]
         query = urlencode(sorted(set(pairs)))
-        return urlunsplit(("https", "www.eporner.com", path, query, ""))
+        return urlunsplit(("https", "www.portal-grid.example", path, query, ""))
 
     def recognize(self, url: str) -> Literal["directory", "profile"] | None:
         for kind in ("directory", "profile"):
@@ -241,7 +241,7 @@ class EpornerDirectoryAdapter:
                 candidate = urljoin(base, raw)
                 parts = urlsplit(candidate)
                 safe = (parts.scheme == "https" and parts.hostname
-                        and (parts.hostname == "eporner.com" or parts.hostname.endswith(".eporner.com"))
+                        and (parts.hostname == "portal-grid.example" or parts.hostname.endswith(".portal-grid.example"))
                         and parts.port in (None, 443) and not parts.username and not parts.password)
             except ValueError:
                 safe = False
@@ -366,9 +366,9 @@ class EpornerDirectoryAdapter:
         page_complete = "card_without_supported_profile_url" not in warnings
         return DirectoryPage(
             adapter_id=self.adapter_id,
-            directory_key=stable_key(self.adapter_id, "https://www.eporner.com/pornstar-list/"),
+            directory_key=stable_key(self.adapter_id, "https://portal-grid.example/pornstar-list/"),
             query_key=stable_key(self.adapter_id, self.context_url(url)),
-            source_url="https://www.eporner.com/pornstar-list/", page_url=url,
+            source_url="https://portal-grid.example/pornstar-list/", page_url=url,
             items=entries, loaded_count=len(entries), page_complete=page_complete,
             directory_complete=page_complete and current == 1 and has_more is False,
             pagination=DirectoryPagination(current_page=current, links=links,
@@ -378,8 +378,8 @@ class EpornerDirectoryAdapter:
         )
 
 
-class PornhubDirectoryAdapter:
-    adapter_id = "pornhub"
+class PortalTubeDirectoryAdapter:
+    adapter_id = "portal_tube"
     profile_path = re.compile(
         r"^/(?:pornstar|model|channels|users)/[a-zA-Z0-9_\-]+(?:/(?:videos|photos|playlists|gifs|about|stream))?/?\Z",
         re.I,
@@ -395,7 +395,7 @@ class PornhubDirectoryAdapter:
         try:
             parts = urlsplit(url)
             host = (parts.hostname or "").lower()
-            valid_host = bool(re.search(r"(?:^|\.)pornhub\.[a-z.]+$", host))
+            valid_host = bool(re.search(r"(?:^|\.)portal_tube\.[a-z.]+$", host))
             valid_origin = (
                 parts.scheme in ("http", "https")
                 and valid_host
@@ -414,8 +414,8 @@ class PornhubDirectoryAdapter:
         if kind == "profile":
             if not self.profile_path.match(raw_path):
                 raise DirectoryInputError("unsupported_route")
-            from .profile_hub_workers import normalize_pornhub_profile_base_url
-            return normalize_pornhub_profile_base_url(url)
+            from .profile_hub_workers import normalize_portal_tube_profile_base_url
+            return normalize_portal_tube_profile_base_url(url)
 
         if kind == "directory":
             if not self.directory_path.match(raw_path):
@@ -446,7 +446,7 @@ class PornhubDirectoryAdapter:
             normalized_pairs.append((key, value))
 
         query = urlencode(sorted(set(normalized_pairs)))
-        return urlunsplit(("https", "www.pornhub.com", raw_path, query, ""))
+        return urlunsplit(("https", "www.portal-tube.example", raw_path, query, ""))
 
     def recognize(self, url: str) -> Literal["directory", "profile"] | None:
         for kind in ("directory", "profile"):
@@ -497,9 +497,9 @@ class PornhubDirectoryAdapter:
                 parts = urlsplit(candidate)
                 hostname = (parts.hostname or "").lower()
                 safe_host = (
-                    hostname in ("pornhub.com", "phncdn.com")
-                    or hostname.endswith(".pornhub.com")
-                    or hostname.endswith(".phncdn.com")
+                    hostname in ("portal-tube.example", "cdn.portal-tube.example")
+                    or hostname.endswith(".portal-tube.example")
+                    or hostname.endswith(".cdn.portal-tube.example")
                 )
                 safe = (
                     parts.scheme == "https"
@@ -671,11 +671,11 @@ class PornhubDirectoryAdapter:
         current_parts = urlsplit(url)
         query_dict = dict(parse_qsl(current_parts.query))
         active_letter = query_dict.get("letter", "").upper() or None
-        base_source = urlunsplit(("https", "www.pornhub.com", current_parts.path, "", ""))
+        base_source = urlunsplit(("https", "www.portal-tube.example", current_parts.path, "", ""))
         alphabet_links = {
             ch: urlunsplit((
                 "https",
-                "www.pornhub.com",
+                "www.portal-tube.example",
                 "/pornstars",
                 urlencode([(k, v) for k, v in parse_qsl(current_parts.query) if k not in ("page", "letter")] + [("letter", ch.lower())]),
                 "",
@@ -933,9 +933,9 @@ def is_male_performer(name: str | None, url: str | None) -> bool:
     return False
 
 
-class XhamsterDirectoryAdapter:
-    adapter_id = "xhamster"
-    hosts = frozenset({"xhamster.com", "xhcdn.com", "xhday.com", "xhvideotop.com", "xhamsterlive.com"})
+class PortalStateDirectoryAdapter:
+    adapter_id = "portal_state"
+    hosts = frozenset({"portal-state.example", "cdn.portal-state.example", "xhday.com", "xhvideotop.com", "portal-state.example"})
     reserved_prefixes = frozenset({"all", "top", "categories", "countries", "vr", "4k", "best", "pornstars"})
 
     def normalize_url(self, url: str, *, kind: str = "directory") -> str:
@@ -946,7 +946,7 @@ class XhamsterDirectoryAdapter:
             host = (parts.hostname or "").lower()
             valid_host = bool(
                 re.search(
-                    r"(?:^|\.)(?:[a-z]{2,3}\.)?(xhamster|xhcdn|xhday|xhvideotop|xhamsterlive|xhamster\d*)\.[a-z.]+$",
+                    r"(?:^|\.)(?:[a-z]{2,3}\.)?(portal_state|portal_state_cdn|xhday|xhvideotop|portal_statelive|portal_state\d*)\.[a-z.]+$",
                     host,
                 )
             )
@@ -990,8 +990,8 @@ class XhamsterDirectoryAdapter:
         if kind == "profile":
             if is_dir:
                 raise DirectoryInputError("unsupported_route")
-            from .profile_hub_workers import normalize_xhamster_profile_base_url
-            return normalize_xhamster_profile_base_url(url)
+            from .profile_hub_workers import normalize_portal_state_profile_base_url
+            return normalize_portal_state_profile_base_url(url)
 
         if kind == "directory":
             if not is_dir:
@@ -1028,7 +1028,7 @@ class XhamsterDirectoryAdapter:
             normalized_pairs.append((key, value))
 
         query = urlencode(sorted(set(normalized_pairs)))
-        return urlunsplit(("https", "xhamster.com", clean_path, query, ""))
+        return urlunsplit(("https", "portal-state.example", clean_path, query, ""))
 
     def recognize(self, url: str) -> Literal["directory", "profile"] | None:
         for kind in ("directory", "profile"):
@@ -1090,10 +1090,10 @@ class XhamsterDirectoryAdapter:
                 parts = urlsplit(candidate)
                 hostname = (parts.hostname or "").lower()
                 safe_host = (
-                    "xhcdn" in hostname
-                    or "xhamster" in hostname
-                    or hostname.endswith(".xhcdn.com")
-                    or hostname.endswith(".xhamster.com")
+                    "portal_state_cdn" in hostname
+                    or "portal_state" in hostname
+                    or hostname.endswith(".cdn.portal-state.example")
+                    or hostname.endswith(".portal-state.example")
                 )
                 safe = (
                     parts.scheme == "https"
@@ -1211,9 +1211,9 @@ class XhamsterDirectoryAdapter:
 
             slug = (urlsplit(source).path.split("/")[-1] or "").lower()
             norm_name = (name or "").lower().strip()
-            if url.startswith("https://xhamster.com/shemale/") or "/shemale/" in url:
+            if url.startswith("https://portal-state.example/shemale/") or "/shemale/" in url:
                 card_gender = "trans"
-            elif url.startswith("https://xhamster.com/gay/") or "/gay/" in url:
+            elif url.startswith("https://portal-state.example/gay/") or "/gay/" in url:
                 card_gender = "male"
             elif is_male_performer(name, source):
                 card_gender = "male"
@@ -1290,7 +1290,7 @@ class XhamsterDirectoryAdapter:
 
         filter_query = urlencode([(k, v) for k, v in parse_qsl(urlsplit(url).query) if k != "page"])
         for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-            base_alpha = alphabet_links.get(ch, f"https://xhamster.com/pornstars/all/{ch.lower()}")
+            base_alpha = alphabet_links.get(ch, f"https://portal-state.example/pornstars/all/{ch.lower()}")
             if filter_query:
                 parts = urlsplit(base_alpha)
                 q = f"{parts.query}&{filter_query}" if parts.query else filter_query
@@ -1325,7 +1325,7 @@ class XhamsterDirectoryAdapter:
                 active_category = m_curr_cat.group(1)
 
         capabilities = DirectoryCapabilities(
-            all_url="https://xhamster.com/pornstars",
+            all_url="https://portal-state.example/pornstars",
             query_url=self.context_url(url),
             active_letter=active_letter,
             active_category=active_category,
@@ -1401,9 +1401,9 @@ class XhamsterDirectoryAdapter:
         entries = list(profiles.values())
         return DirectoryPage(
             adapter_id=self.adapter_id,
-            directory_key=stable_key(self.adapter_id, "https://xhamster.com/pornstars"),
+            directory_key=stable_key(self.adapter_id, "https://portal-state.example/pornstars"),
             query_key=stable_key(self.adapter_id, self.context_url(url)),
-            source_url="https://xhamster.com/pornstars",
+            source_url="https://portal-state.example/pornstars",
             page_url=url,
             items=entries,
             loaded_count=len(entries),
@@ -1422,16 +1422,132 @@ class XhamsterDirectoryAdapter:
         )
 
 
+class DynamicVideoPortalDirectoryAdapter:
+    """Generic directory & URL adapter backed by VideoPortalDescriptor."""
+
+    def __init__(self, desc):
+        self._desc = desc
+        self.adapter_id = desc.id
+
+    def _dir_rules(self) -> dict:
+        dirs = (self._desc.browse or {}).get("directories")
+        return dirs if isinstance(dirs, dict) else {}
+
+    def _match_dir_kind(self, path: str) -> str | None:
+        norm = "/" + path.strip("/")
+        for kind, rule in self._dir_rules().items():
+            if not isinstance(rule, dict):
+                continue
+            tmpl = str(rule.get("pathTemplate") or "")
+            prefix = tmpl.split("{", 1)[0].rstrip("/")
+            if prefix and (norm == prefix or norm.startswith(prefix + "/")):
+                return str(kind)
+        return None
+
+    def recognize(self, url: str) -> Literal["directory", "profile"] | None:
+        from .connector_registry import VideoPortalDescriptor, find_connector_for_url
+        from .video_portal_engine import detect_portal_entity_kind
+
+        conn = find_connector_for_url(url)
+        if not isinstance(conn, VideoPortalDescriptor) or conn.id != self._desc.id:
+            return None
+        path = urlsplit(url).path or "/"
+        if self._match_dir_kind(path):
+            return "directory"
+        kind = detect_portal_entity_kind(url, self._desc)
+        if kind == "directory":
+            return "directory"
+        if kind in ("creator", "channel", "category", "tag"):
+            return "profile"
+        return None
+
+    def normalize_url(self, url: str, *, kind: str = "directory") -> str:
+        from .video_portal_engine import canonicalize_portal_url, normalize_portal_entity_base_url
+
+        detected = self.recognize(url)
+        if detected != kind:
+            raise DirectoryInputError("unsupported_url")
+        if kind == "profile":
+            return normalize_portal_entity_base_url(url, self._desc)
+        return canonicalize_portal_url(url, self._desc)
+
+    def context_url(self, url: str) -> str:
+        canon = self.normalize_url(url, kind="directory")
+        parts = urlsplit(canon)
+        cleaned = re.sub(r"/\d+$", "", parts.path.rstrip("/")) or "/"
+        return urlunsplit((parts.scheme, parts.netloc, cleaned, "", ""))
+
+    def validate_profile(self, url: str) -> str:
+        return self.normalize_url(url, kind="profile")
+
+    def parse(self, url: str, html: str) -> DirectoryPage:
+        from .video_portal_engine import parse_portal_directory_items
+
+        norm_url = self.normalize_url(url, kind="directory")
+        dir_kind = self._match_dir_kind(urlsplit(norm_url).path or "/") or "artists"
+        parsed = parse_portal_directory_items(html, norm_url, self._desc, dir_kind)
+
+        entries: list[ProfileEntry] = []
+        for raw in parsed.get("items") or []:
+            src = raw.get("url") or ""
+            if not src:
+                continue
+            entries.append(
+                ProfileEntry(
+                    key=stable_key(self.adapter_id, src),
+                    source_url=src,
+                    name=raw.get("name"),
+                    image_url=raw.get("thumbnailUrl") or None,
+                    rank=raw.get("rank"),
+                    video_count=raw.get("count"),
+                    provenance_page_url=norm_url,
+                )
+            )
+
+        max_page = int(parsed.get("maxPage") or 1)
+        has_more = bool(parsed.get("hasMore"))
+        return DirectoryPage(
+            adapter_id=self.adapter_id,
+            directory_key=stable_key(self.adapter_id, self.context_url(norm_url)),
+            query_key=stable_key(self.adapter_id, self.context_url(norm_url)),
+            source_url=norm_url,
+            page_url=norm_url,
+            items=entries,
+            loaded_count=len(entries),
+            page_complete=True,
+            directory_complete=not has_more,
+            pagination=DirectoryPagination(
+                current_page=1,
+                links=[],
+                has_more=has_more,
+                reported_total=max_page,
+            ),
+            capabilities=DirectoryCapabilities(
+                name_search_scope="loaded_profiles",
+                source_order="source",
+                local_sort_fields=["name", "rank", "video_count"],
+            ),
+            warnings=[],
+        )
+
+
 ADAPTERS: tuple[DirectoryAdapter, ...] = (
-    EpornerDirectoryAdapter(),
-    PornhubDirectoryAdapter(),
-    XhamsterDirectoryAdapter(),
+    PortalGridDirectoryAdapter(),
+    PortalTubeDirectoryAdapter(),
+    PortalStateDirectoryAdapter(),
 )
 
 
 def recognize_profile_input(url: str) -> tuple[DirectoryAdapter, str]:
     """Capability recognition only: never fetches an individual profile."""
     for adapter in ADAPTERS:
+        kind = adapter.recognize(url)
+        if kind:
+            return adapter, kind
+    from .connector_registry import list_video_portal_descriptors
+
+    for desc in list_video_portal_descriptors():
+        adapter = DynamicVideoPortalDirectoryAdapter(desc)
         kind = adapter.recognize(url)
         if kind:
             return adapter, kind

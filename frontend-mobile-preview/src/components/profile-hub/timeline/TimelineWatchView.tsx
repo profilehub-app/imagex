@@ -1,10 +1,11 @@
 import React, {useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {flushSync} from 'react-dom';
-import {ArrowLeft, Bookmark, Check, ChevronDown, ExternalLink, Heart, ListPlus, Share2, ThumbsDown, UserPlus} from 'lucide-react';
+import {ArrowLeft, Bookmark, Calendar, Check, ChevronDown, Clock, ExternalLink, Eye, Film, Heart, ListPlus, Share2, ThumbsDown, UserPlus} from 'lucide-react';
 import {timelinePlaybackRect, TimelinePostCard, TimelinePlaybackHandoff} from './TimelinePostCard';
 import {
   buildTimelineStreamUrl,
   buildWatchFollowTarget,
+  formatPortalMetric,
   isWatchPageOnlyUrl,
   normalizeTimelineQualities,
   shouldRetryTransientWatchFetch,
@@ -208,6 +209,8 @@ export const TimelineWatchView: React.FC<Props> = ({session, onClose, onChangeVi
     onSectionChange?.(value);
   };
   const [attempt, setAttempt] = useState(0);
+  const [tagsExpandedFor, setTagsExpandedFor] = useState<string | null>(null);
+  const showAllTags = tagsExpandedFor === (sourceUrl || '__watch__');
   const [related, setRelated] = useState<{key:string; data?:ProfileHubRelatedResponse; error?:boolean} | null>(() => {
     if (!sourceUrl) return null;
     const cached = watchMetadataCache.get(sourceUrl)?.related;
@@ -336,10 +339,78 @@ export const TimelineWatchView: React.FC<Props> = ({session, onClose, onChangeVi
       className="w-10 h-10 rounded-full object-cover shrink-0 bg-[var(--tl-surface-elevated)]"
     />
   );
-  const creatorAudience = data?.audience_count_text && data.audience_kind ? data.audience_count_text :
-    activeDetails?.error ? (isEn ? 'Could not load creator details.' : 'Não foi possível carregar os detalhes do criador.') :
-    sourceUrl && !activeDetails ? (isEn ? 'Loading creator details…' : 'Carregando detalhes do criador…') :
-    (isEn ? 'Audience unavailable from the source.' : 'Audiência indisponível na origem.');
+  const knownCreatorMatchesIdentity = Boolean(
+    knownCreator?.profileUrl &&
+      creatorIdentity &&
+      profileShortcutIdentity(knownCreator.profileUrl) === creatorIdentity
+  );
+  const rawAudienceText =
+    data?.audience_count_text && data.audience_kind
+      ? data.audience_count_text
+      : knownCreatorMatchesIdentity
+        ? (knownCreator?.stats?.subscribers ?? knownCreator?.stats?.followers ?? null)
+        : null;
+  const resolvedAudienceKind: 'subscribers' | 'followers' | null =
+    data?.audience_count_text && data.audience_kind
+      ? data.audience_kind
+      : knownCreatorMatchesIdentity
+        ? (knownCreator?.stats?.subscribers
+            ? 'subscribers'
+            : knownCreator?.stats?.followers
+              ? 'followers'
+              : null)
+        : null;
+  const formatWatchAudience = (
+    raw: string | number | null | undefined,
+    kind: 'subscribers' | 'followers' | null,
+  ): string | null => {
+    if (raw === null || raw === undefined) return null;
+    const text = String(raw).replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    const hasUnit = /\b(subscribers?|followers?|inscritos?|seguidores?)\b/i.test(text);
+    if (hasUnit) {
+      if (isEn) return text;
+      return text
+        .replace(/\bsubscribers?\b/i, 'inscritos')
+        .replace(/\bfollowers?\b/i, 'seguidores');
+    }
+    const compact = formatPortalMetric(text, isEn ? 'en-US' : 'pt-BR') || text;
+    const unit = kind === 'followers'
+      ? (isEn ? 'followers' : 'seguidores')
+      : (isEn ? 'subscribers' : 'inscritos');
+    return `${compact} ${unit}`;
+  };
+  const watchLocale = isEn ? 'en-US' : 'pt-BR';
+  const rawViewsValue = data?.view_count_text || session.post.views;
+  const formattedWatchViews = useMemo(() => {
+    const compact = formatPortalMetric(rawViewsValue, watchLocale);
+    if (!compact) return null;
+    if (/\b(views?|visualiza[çc][õo]es)\b/i.test(compact)) return compact;
+    return `${compact} ${isEn ? 'views' : 'visualizações'}`;
+  }, [rawViewsValue, watchLocale, isEn]);
+  const formattedWatchDate = useMemo(() => {
+    const raw = data?.upload_date?.trim();
+    if (!raw) return null;
+    if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+      const parsed = new Date(raw);
+      if (Number.isFinite(parsed.getTime())) {
+        try {
+          return new Intl.DateTimeFormat(watchLocale, { dateStyle: 'medium' }).format(parsed);
+        } catch {
+          return raw.slice(0, 10);
+        }
+      }
+    }
+    return raw;
+  }, [data?.upload_date, watchLocale]);
+  const formattedCreatorAudience = formatWatchAudience(rawAudienceText, resolvedAudienceKind);
+  const creatorAudience = formattedCreatorAudience
+    ? formattedCreatorAudience
+    : activeDetails?.error
+      ? (isEn ? 'Could not load creator details.' : 'Não foi possível carregar os detalhes do criador.')
+      : sourceUrl && !activeDetails
+        ? (isEn ? 'Loading creator details…' : 'Carregando detalhes do criador…')
+        : null;
   const followedProfileIdentities = favorites
     .filter(item => item.kind === 'profile')
     .map(item => profileShortcutIdentity(item.url))
@@ -606,12 +677,40 @@ export const TimelineWatchView: React.FC<Props> = ({session, onClose, onChangeVi
         </div>
         <div className="min-w-0 space-y-4 px-3.5 sm:px-0">
           <h2 className="text-lg sm:text-xl font-bold text-[var(--tl-text-primary)] leading-snug break-words">{data?.title || session.post.title || (isEn ? 'Untitled video' : 'Vídeo sem título')}</h2>
+          {(formattedWatchViews || formattedWatchDate || session.post.resolution || session.post.duration) && (
+            <div className="tl-watch-stats-bar" data-watch-stats-bar>
+              {formattedWatchViews && (
+                <span className="tl-watch-stat-pill" data-watch-views>
+                  <Eye className="w-3.5 h-3.5 opacity-75 shrink-0" aria-hidden="true" />
+                  <span>{formattedWatchViews}</span>
+                </span>
+              )}
+              {formattedWatchDate && (
+                <span className="tl-watch-stat-pill" data-watch-upload-date>
+                  <Calendar className="w-3.5 h-3.5 opacity-75 shrink-0" aria-hidden="true" />
+                  <span>{formattedWatchDate}</span>
+                </span>
+              )}
+              {session.post.resolution && (
+                <span className="tl-watch-stat-pill" data-watch-resolution>
+                  <Film className="w-3.5 h-3.5 opacity-75 shrink-0" aria-hidden="true" />
+                  <span>{session.post.resolution}</span>
+                </span>
+              )}
+              {session.post.duration && (
+                <span className="tl-watch-stat-pill" data-watch-duration>
+                  <Clock className="w-3.5 h-3.5 opacity-75 shrink-0" aria-hidden="true" />
+                  <span>{session.post.duration}</span>
+                </span>
+              )}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-3 min-w-0">
             <div data-watch-creator className="flex items-center gap-3 min-w-0 flex-1">
               {creatorUrl ? <button type="button" onClick={() => onOpenCreator(creatorUrl, {name: creatorName, avatar: resolvedCreatorAvatar})} aria-label={isEn ? `Open ${creatorName}'s profile in Timeline` : `Abrir perfil de ${creatorName} na timeline`} className={`shrink-0 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--tl-accent-hover)]${disableMotion ? '' : ' cute-press'}`}>{creatorImage}</button> : creatorImage}
               <div className="min-w-0 flex-1 space-y-0.5">
                 <div className="text-sm font-semibold text-[var(--tl-text-primary)] truncate min-w-0">{creatorUrl ? <button type="button" onClick={() => onOpenCreator(creatorUrl, {name: creatorName, avatar: resolvedCreatorAvatar})} aria-label={isEn ? `Open ${creatorName}'s profile in Timeline` : `Abrir perfil de ${creatorName} na timeline`} className="inline-flex items-center gap-1.5 text-left hover:text-[var(--tl-accent-text)] rounded max-w-full truncate focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--tl-accent-hover)]">{creatorName}</button> : <span className="truncate">{creatorName}</span>}</div>
-                <p data-watch-creator-audience className="text-xs text-[var(--tl-text-muted)] truncate" role={sourceUrl && !activeDetails ? 'status' : undefined}>{creatorAudience}</p>
+                {creatorAudience && <p data-watch-creator-audience className="text-xs text-[var(--tl-text-muted)] truncate" role={sourceUrl && !activeDetails ? 'status' : undefined}>{creatorAudience}</p>}
                 {activeDetails?.error && <div>{retry}</div>}
               </div>
             </div>
@@ -712,10 +811,10 @@ export const TimelineWatchView: React.FC<Props> = ({session, onClose, onChangeVi
                 {data?.like_count != null && (
                   <span
                     data-source-like-count
-                    title={isEn ? 'Source likes (read-only)' : 'Curtidas na origem (somente leitura)'}
+                    title={isEn ? `Source likes (read-only): ${data.like_count.toLocaleString(watchLocale)}` : `Curtidas na origem (somente leitura): ${data.like_count.toLocaleString(watchLocale)}`}
                     className="font-mono text-[11px] font-semibold tabular-nums"
                   >
-                    {data.like_count}
+                    {formatPortalMetric(data.like_count, watchLocale) ?? data.like_count}
                   </span>
                 )}
               </button>
@@ -723,13 +822,15 @@ export const TimelineWatchView: React.FC<Props> = ({session, onClose, onChangeVi
                 <>
                   <span role="separator" aria-orientation="vertical" className="w-px h-4 bg-[var(--tl-border)] shrink-0" />
                   <span
-                    aria-label={data.dislike_count != null ? (isEn ? `Source dislikes: ${data.dislike_count}` : `Descurtidas na origem: ${data.dislike_count}`) : (isEn ? 'Source dislikes unavailable' : 'Descurtidas indisponíveis na origem')}
-                    title={data.dislike_count != null ? (isEn ? `Source dislikes: ${data.dislike_count}` : `Descurtidas na origem: ${data.dislike_count}`) : (isEn ? 'Source dislikes unavailable' : 'Descurtidas indisponíveis na origem')}
+                    aria-label={data.dislike_count != null ? (isEn ? `Source dislikes: ${data.dislike_count.toLocaleString(watchLocale)}` : `Descurtidas na origem: ${data.dislike_count.toLocaleString(watchLocale)}`) : (isEn ? 'Source dislikes unavailable' : 'Descurtidas indisponíveis na origem')}
+                    title={data.dislike_count != null ? (isEn ? `Source dislikes: ${data.dislike_count.toLocaleString(watchLocale)}` : `Descurtidas na origem: ${data.dislike_count.toLocaleString(watchLocale)}`) : (isEn ? 'Source dislikes unavailable' : 'Descurtidas indisponíveis na origem')}
                     className="h-[36px] inline-flex items-center gap-1 px-2.5 text-xs text-[var(--tl-text-secondary)] rounded-r-full shrink-0"
                   >
                     <ThumbsDown className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                     {data.dislike_count != null && (
-                      <span className="font-mono text-[11px] tabular-nums">{data.dislike_count}</span>
+                      <span className="font-mono text-[11px] tabular-nums">
+                        {formatPortalMetric(data.dislike_count, watchLocale) ?? data.dislike_count}
+                      </span>
                     )}
                   </span>
                 </>
@@ -826,6 +927,50 @@ export const TimelineWatchView: React.FC<Props> = ({session, onClose, onChangeVi
               )}
             </div>
           </div>
+          {((data?.categories && data.categories.length > 0) || (data?.tags && data.tags.length > 0)) && (() => {
+            const allTags = data?.tags || [];
+            const visibleTags = showAllTags ? allTags : allTags.slice(0, 8);
+            const extraTagCount = Math.max(0, allTags.length - 8);
+            return (
+              <div className="flex flex-wrap items-center gap-1.5" data-watch-metadata-chips>
+                {data?.categories?.slice(0, 6).map((cat) => (
+                  <button
+                    key={`wcat-${cat.url}`}
+                    type="button"
+                    data-watch-category={cat.name}
+                    onClick={() => onOpenCreator(cat.url, { name: cat.name })}
+                    className="tl-watch-category-subtle"
+                  >
+                    {cat.name}
+                  </button>
+                ))}
+                {visibleTags.map((tag) => (
+                  <button
+                    key={`wtag-${tag.url}`}
+                    type="button"
+                    data-watch-tag={tag.name}
+                    onClick={() => onOpenCreator(tag.url, { name: tag.name })}
+                    className="tl-watch-tags-muted"
+                  >
+                    #{tag.name}
+                  </button>
+                ))}
+                {extraTagCount > 0 && (
+                  <button
+                    type="button"
+                    data-watch-tags-toggle
+                    aria-expanded={showAllTags}
+                    onClick={() => setTagsExpandedFor(showAllTags ? null : (sourceUrl || '__watch__'))}
+                    className="tl-watch-category-subtle"
+                  >
+                    {showAllTags
+                      ? (isEn ? 'Show fewer tags' : 'Ocultar tags extras')
+                      : (isEn ? `+${extraTagCount} more tags` : `+${extraTagCount} tags`)}
+                  </button>
+                )}
+              </div>
+            );
+          })()}
           <div data-watch-about className="rounded-2xl bg-[var(--tl-surface)] border border-[var(--tl-border)] hover:border-[var(--tl-accent-border)] smooth-transition overflow-hidden">
             <button
               type="button"

@@ -1,6 +1,8 @@
 import React from 'react';
 import { version as appVersion } from '../../../package.json';
 import { feedbackConfigured } from '../../services/feedbackService';
+import { getCommunityConfig } from '../../services/communityConfig';
+import { SupportActionLinks } from '../common/SupportDialog';
 import {
   Film,
   PlaySquare,
@@ -422,6 +424,31 @@ export const SettingsView: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Community & Project Support Card */}
+      {(() => {
+        const supportT = (translations[settings.language]?.support || translations['pt-BR']?.support) as Record<string, string>;
+        const communityConfig = getCommunityConfig();
+        return (
+          <div className="glass-panel p-4 sm:p-6 rounded-3xl border border-rose-500/25 bg-gradient-to-r from-rose-950/15 via-surface/60 to-surface/90 space-y-4">
+            <div className="flex items-start gap-3">
+              <IconBadge icon={<Sparkles size={16} className="text-rose-300" />} variant="neon" size="md" />
+              <div className="space-y-1">
+                <h3 className="font-extrabold text-sm text-[var(--text-primary)]">
+                  {supportT.settingsTitle}
+                </h3>
+                <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+                  {supportT.settingsDesc}
+                </p>
+              </div>
+            </div>
+            <SupportActionLinks lang={settings.language} config={communityConfig} variant="settings" />
+            <p className="text-[11px] text-[var(--text-muted)]">
+              {supportT.privacyNote}
+            </p>
+          </div>
+        );
+      })()}
 
       <div className="glass-panel p-4 sm:p-6 rounded-3xl border border-border space-y-3">
         <div className="flex items-start justify-between gap-4">

@@ -1,7 +1,7 @@
 """Generic, provider-agnostic profile tab discovery and multi-strategy pagination.
 
 Designed following the Open/Closed Principle (OCP) so any profile source
-(Eporner, Pornhub, xHamster, generic or future sites) can discover dedicated
+(video portals, catalogs, generic or future sites) can discover dedicated
 videos/albums/playlists tabs and paginate reliably without site-specific hardcoding.
 """
 from __future__ import annotations

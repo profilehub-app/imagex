@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IMAGEX.AI - Critical Performance & Architecture Auditor Agent
+IMAGEX - Critical Performance & Architecture Auditor Agent
 ============================================================
 Autonomous agent for rigorous multi-layer evaluation of image rendering performance,
 DOM memory footprint, network concurrency, and CPU bottlenecks.

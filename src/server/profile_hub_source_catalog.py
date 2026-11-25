@@ -1,4 +1,4 @@
-"""Read the source-declared xHamster video tab and all its linked pages.
+"""Read the source-declared video tab and all its linked pages.
 
 No storage or application startup. Root showcases must not suppress a video tab,
 and overlapping pages must not prevent discovery of subsequent pages.
@@ -9,15 +9,15 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 
 from .profile_hub_pagination import discover_profile_section_urls, extract_next_page_urls
-from .profile_hub_workers import extract_xhamster_videos_lexbor
+from .profile_hub_workers import extract_portal_state_videos_lexbor
 
 CATALOG_PAGE_DELAY_SECONDS = 0.4  # Pace sequential source requests, as in the existing scanner.
 MAX_CATALOG_REDIRECTS = 5  # Match the scanner's bounded redirect budget.
 
 
-async def collect_xhamster_catalog(client, profile_url, root_html, *, on_batch,
-                                   initial_videos=(), reported_total=None,
-                                   delay_seconds=CATALOG_PAGE_DELAY_SECONDS):
+async def collect_state_catalog(client, profile_url, root_html, *, on_batch,
+                                initial_videos=(), reported_total=None,
+                                delay_seconds=CATALOG_PAGE_DELAY_SECONDS):
     origin = urlsplit(profile_url)
     root_path = origin.path.rstrip('/')
 
@@ -62,7 +62,7 @@ async def collect_xhamster_catalog(client, profile_url, root_html, *, on_batch,
                 complete = False  # Redirected back to an already-read showcase/page.
                 continue
             seen_pages.add(final_key)
-            canonical, raw = extract_xhamster_videos_lexbor(final_url, response.text)
+            canonical, raw = extract_portal_state_videos_lexbor(final_url, response.text)
             new_can, new_raw = [], []
             for index, video in enumerate(canonical):
                 identity = video.get('originalUrl')

@@ -6,6 +6,7 @@ overlapped network/CPU discovery pipelines, and HTTP keep-alive connection reuse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 from typing import Any, Dict, List, Literal, Optional
@@ -15,14 +16,30 @@ import httpx
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from selectolax.lexbor import LexborHTMLParser
+
+from .connector_registry import VideoPortalDescriptor, find_connector_for_url
+from .original_image_resolver import is_forum_host
 
 from .profile_directory_transport import solve_js_challenge
 from .profile_hub_collection_parser import parse_album_page, parse_playlist_page
 from .profile_hub_album_paging import ALBUM_HTML_CONCURRENCY, album_batch_bounds, album_query_page_url, album_link_page_url
 from .profile_hub_lookup import cached_metadata, lookup_metadata, prefetch_metadata, start_catalog_prefetch
-from .profile_hub_manifest import _http_url, _image_url, parse_profile_page
+from .profile_hub_manifest import _http_url, _image_url, assemble_video_portal_profile, parse_profile_page
+from .video_portal_engine import (
+    build_portal_entity_page_url,
+    canonicalize_portal_url,
+    detect_portal_entity_kind,
+    extract_portal_max_page,
+    normalize_portal_entity_base_url,
+    parse_portal_albums,
+    parse_portal_playlist_videos,
+    parse_portal_playlists,
+    parse_portal_profile_root,
+    parse_portal_video_cards,
+    parse_portal_video_json_items,
+)
 from .profile_hub_metadata import extract_collection_metadata, extract_video_metadata
 from .profile_hub_resolution import PhotoResolveRequest, PhotoResolveResult, resolve_photo_original
 from .profile_hub_pagination import (
@@ -33,39 +50,39 @@ from .profile_hub_pagination import (
     extract_next_page_urls,
 )
 from .profile_hub_workers import (
-    extract_eporner_albums_lexbor,
-    extract_eporner_playlists_lexbor,
-    extract_eporner_root_lexbor,
-    extract_eporner_videos_lexbor,
-    extract_pornhub_albums_lexbor,
-    extract_pornhub_gifs_lexbor,
-    extract_pornhub_max_video_page,
-    extract_pornhub_playlists_lexbor,
-    extract_pornhub_root_lexbor,
-    extract_pornhub_videos_lexbor,
-    _extract_xhamster_initials,
-    extract_xhamster_albums_lexbor,
-    extract_xhamster_max_video_page,
-    extract_xhamster_root_lexbor,
-    extract_xhamster_shorts_lexbor,
-    extract_xhamster_videos_lexbor,
+    extract_portal_grid_albums_lexbor,
+    extract_portal_grid_playlists_lexbor,
+    extract_portal_grid_root_lexbor,
+    extract_portal_grid_videos_lexbor,
+    extract_portal_tube_albums_lexbor,
+    extract_portal_tube_gifs_lexbor,
+    extract_portal_tube_max_video_page,
+    extract_portal_tube_playlists_lexbor,
+    extract_portal_tube_root_lexbor,
+    extract_portal_tube_videos_lexbor,
+    _extract_window_initials,
+    extract_portal_state_albums_lexbor,
+    extract_portal_state_max_video_page,
+    extract_portal_state_root_lexbor,
+    extract_portal_state_shorts_lexbor,
+    extract_portal_state_videos_lexbor,
     _extract_yt_initial_data,
     extract_youtube_root_lexbor,
     extract_youtube_videos_lexbor,
-    is_pornhub_host,
-    is_pornhub_profile_url,
-    is_xhamster_host,
-    is_xhamster_profile_url,
+    is_portal_tube_host,
+    is_portal_tube_profile_url,
+    is_portal_state_host,
+    is_portal_state_profile_url,
     is_youtube_channel_url,
-    normalize_pornhub_profile_base_url,
-    normalize_xhamster_profile_base_url,
+    normalize_portal_tube_profile_base_url,
+    normalize_portal_state_profile_base_url,
     normalize_youtube_channel_base_url,
     run_in_worker_pool,
     warm_worker_pool,
 )
 
 router = APIRouter(prefix="/api/profile-hub", tags=["Profile Hub"])
-from .profile_hub_source_catalog import collect_xhamster_catalog
+from .profile_hub_source_catalog import collect_state_catalog
 from .profile_hub_recent import router as recent_profile_router
 router.include_router(recent_profile_router)
 MAX_HTML_BYTES = 8 * 1024 * 1024
@@ -78,7 +95,7 @@ DEFAULT_HEADERS = {
 _ORIG_BS4_INIT = BeautifulSoup.__init__
 
 
-def _solve_pornhub_challenge(html: str) -> str | None:
+def _solve_portal_tube_challenge(html: str) -> str | None:
     if not html:
         return None
     m = re.search(r"document\.cookie\s*=\s*[\"']([^\"']+)[\"']", html)
@@ -98,23 +115,23 @@ async def _fetch_ph_or_default(
             resp = await client.get(url)
     else:
         resp = await client.get(url)
-    if is_pornhub_host(url) and resp.status_code == 200:
+    if is_portal_tube_host(url) and resp.status_code == 200:
         for _ in range(3):
             if "leastFactor" not in resp.text:
                 break
             solved_cookies = await asyncio.to_thread(solve_js_challenge, resp.text)
             if solved_cookies:
                 for k, v in solved_cookies.items():
-                    for domain in (".pornhub.com", "pornhub.com", "www.pornhub.com"):
+                    for domain in (".portal-tube.example", "portal-tube.example", "www.portal-tube.example"):
                         try:
                             client.cookies.set(k.strip(), v.strip(), domain=domain)
                         except Exception:
                             pass
             else:
-                cookie = _solve_pornhub_challenge(resp.text)
+                cookie = _solve_portal_tube_challenge(resp.text)
                 if cookie and "=" in cookie:
                     k, v = cookie.split("=", 1)
-                    for domain in (".pornhub.com", "pornhub.com", "www.pornhub.com"):
+                    for domain in (".portal-tube.example", "portal-tube.example", "www.portal-tube.example"):
                         try:
                             client.cookies.set(k.strip(), v.strip(), domain=domain)
                         except Exception:
@@ -217,7 +234,7 @@ async def collect_playlist_search_pages(
             _notify_bs4_spy_if_hooked(resp.text)
             if use_workers:
                 extracted = await run_in_worker_pool(
-                    ("eporner_playlists", profile_url or source_url, str(resp.url), resp.text, fallback_avatar),
+                    ("portal_grid_playlists", profile_url or source_url, str(resp.url), resp.text, fallback_avatar),
                     html_size=len(resp.content),
                 )
                 return url, resp, extracted
@@ -266,8 +283,10 @@ def profile_search_slug(source_url, soup):
 
 
 class AlbumPhotosRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     url: str
     page: int = Field(default=1, ge=1)
+    page_url: Optional[str] = Field(default=None, alias="pageUrl")
 
 
 class PlaylistVideosRequest(BaseModel):
@@ -351,10 +370,13 @@ async def enrich_video_metadata(client, videos):
 async def _scan_profile(request: ProfileScanRequest, on_profile=None):
     """Deep multi-page crawl of performer profile: overlapped network and multiprocess Lexbor extraction."""
     source_url = request.url.strip()
-    if is_pornhub_host(source_url):
-        source_url = normalize_pornhub_profile_base_url(source_url)
-    elif is_xhamster_host(source_url):
-        source_url = normalize_xhamster_profile_base_url(source_url)
+    vp_early_conn = find_connector_for_url(source_url)
+    if isinstance(vp_early_conn, VideoPortalDescriptor):
+        source_url = normalize_portal_entity_base_url(source_url, vp_early_conn) or source_url
+    elif is_portal_tube_host(source_url):
+        source_url = normalize_portal_tube_profile_base_url(source_url)
+    elif is_portal_state_host(source_url):
+        source_url = normalize_portal_state_profile_base_url(source_url)
     parsed = urlsplit(source_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
         raise HTTPException(status_code=400, detail="A valid HTTP or HTTPS profile URL is required")
@@ -385,8 +407,8 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
             html = response.text
             final_url = str(response.url)
 
-            # Check route fallback for Pornhub if redirected or serving catalog directory root
-            if is_pornhub_host(source_url):
+            # Check route fallback for PortalTube if redirected or serving catalog directory root
+            if is_portal_tube_host(source_url):
                 m_canon = re.search(r'<link[^>]+rel=[\"\']canonical[\"\'][^>]+href=[\"\']([^\"\']+)[\"\']', html, re.I)
                 canon_href = (m_canon.group(1) or "").lower() if m_canon else ""
                 m_title = re.search(r'<title>(.*?)</title>', html, re.I | re.S)
@@ -404,7 +426,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     if slug_match:
                         slug = slug_match.group(1)
                         for cand in ["model", "pornstar", "channels", "users"]:
-                            cand_url = f"https://www.pornhub.com/{cand}/{slug}"
+                            cand_url = f"https://portal-tube.example/{cand}/{slug}"
                             try:
                                 cand_resp = await _fetch_ph_or_default(client, cand_url)
                                 cand_final_path = urlsplit(str(cand_resp.url)).path.rstrip("/").lower()
@@ -431,27 +453,40 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
             _notify_bs4_spy_if_hooked(html)
 
             is_youtube = is_youtube_channel_url(final_url)
-            is_pornhub = not is_youtube and (is_pornhub_profile_url(final_url) or is_pornhub_host(final_url))
-            is_xhamster = not is_youtube and not is_pornhub and (is_xhamster_profile_url(final_url) or is_xhamster_host(final_url))
-            is_eporner = not is_youtube and not is_pornhub and not is_xhamster and ("eporner" in urlsplit(final_url).netloc.lower())
+            is_portal_tube = not is_youtube and (is_portal_tube_profile_url(final_url) or is_portal_tube_host(final_url))
+            is_portal_state = not is_youtube and not is_portal_tube and (is_portal_state_profile_url(final_url) or is_portal_state_host(final_url))
+            is_portal_grid = not is_youtube and not is_portal_tube and not is_portal_state and ("portal_grid" in urlsplit(final_url).netloc.lower())
+            vp_conn = (
+                find_connector_for_url(final_url)
+                if not (is_youtube or is_portal_tube or is_portal_state or is_portal_grid)
+                else None
+            )
+            is_video_portal = isinstance(vp_conn, VideoPortalDescriptor)
+            vp_root_meta = None
             if is_youtube:
                 root_parsed = extract_youtube_root_lexbor(final_url, html)
-            elif is_pornhub:
-                root_parsed = extract_pornhub_root_lexbor(final_url, html)
-            elif is_xhamster:
-                root_parsed = extract_xhamster_root_lexbor(final_url, html)
-            elif is_eporner:
+            elif is_portal_tube:
+                root_parsed = extract_portal_tube_root_lexbor(final_url, html)
+            elif is_portal_state:
+                root_parsed = extract_portal_state_root_lexbor(final_url, html)
+            elif is_portal_grid:
                 # Parse the single root page immediately in-process with native Lexbor (~4ms)
                 # so initial profile delivery never waits for cold worker process creation.
-                root_parsed = extract_eporner_root_lexbor(final_url, html)
+                root_parsed = extract_portal_grid_root_lexbor(final_url, html)
+            elif is_video_portal:
+                vp_root_meta = parse_portal_profile_root(html, final_url, vp_conn)
+                root_parsed = {
+                    "metadata": vp_root_meta,
+                    "videos": parse_portal_video_cards(html, final_url, vp_conn),
+                }
             else:
                 root_parsed = LexborHTMLParser(html)
                 if (
                     root_parsed.css_first("div[class*=psbio]") is not None
                     or root_parsed.css_first("div.pornstar-video-results-layout") is not None
                 ):
-                    is_eporner = True
-                    root_parsed = extract_eporner_root_lexbor(final_url, root_parsed)
+                    is_portal_grid = True
+                    root_parsed = extract_portal_grid_root_lexbor(final_url, root_parsed)
 
             async def _emit_partial():
                 if not on_profile:
@@ -579,10 +614,10 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         on_batch=_on_yt_batch,
                     )
 
-            elif is_pornhub:
+            elif is_portal_tube:
                 if isinstance(httpx.AsyncClient, type):
                     warm_worker_pool()
-                base_profile_url = normalize_pornhub_profile_base_url(final_url)
+                base_profile_url = normalize_portal_tube_profile_base_url(final_url)
                 fallback_avatar = root_parsed.get("avatar") or ""
                 path_lower = urlsplit(final_url).path.rstrip("/").lower()
 
@@ -605,7 +640,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         _notify_bs4_spy_if_hooked(v1_resp.text)
                         v1_html = v1_resp.text
                         v1_extracted = await run_in_worker_pool(
-                            ("pornhub_videos", final_url, v1_resp.text),
+                            ("portal_tube_videos", final_url, v1_resp.text),
                             html_size=len(v1_resp.content),
                         )
                         extra_video_soups.append(v1_extracted)
@@ -622,7 +657,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     except ValueError:
                         pass
 
-                max_video_page = extract_pornhub_max_video_page(v1_html or html)
+                max_video_page = extract_portal_tube_max_video_page(v1_html or html)
                 capped_max_page = min(max_video_page, 50)
 
                 async def fetch_video_page(page_num: int):
@@ -633,7 +668,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                             if resp.status_code == 200 and "leastFactor" not in resp.text:
                                 _notify_bs4_spy_if_hooked(resp.text)
                                 extracted = await run_in_worker_pool(
-                                    ("pornhub_videos", final_url, resp.text),
+                                    ("portal_tube_videos", final_url, resp.text),
                                     html_size=len(resp.content),
                                 )
                                 if extracted and extracted[0]:
@@ -655,7 +690,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         p_text = resp.text
 
                     base_albs = await run_in_worker_pool(
-                        ("pornhub_albums", final_url, p_text),
+                        ("portal_tube_albums", final_url, p_text),
                         html_size=len(p_text.encode("utf-8", errors="ignore")),
                     )
                     c_albs, r_albs = list(base_albs[0]), list(base_albs[1])
@@ -667,7 +702,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         if pub_resp.status_code == 200:
                             _notify_bs4_spy_if_hooked(pub_resp.text)
                             pub_albs = await run_in_worker_pool(
-                                ("pornhub_albums", final_url, pub_resp.text),
+                                ("portal_tube_albums", final_url, pub_resp.text),
                                 html_size=len(pub_resp.content),
                             )
                             for ca, ra in zip(pub_albs[0], pub_albs[1]):
@@ -681,14 +716,14 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                 async def fetch_ph_playlists():
                     if path_lower.endswith("/playlists"):
                         return await run_in_worker_pool(
-                            ("pornhub_playlists", final_url, html, fallback_avatar),
+                            ("portal_tube_playlists", final_url, html, fallback_avatar),
                             html_size=len(html),
                         )
                     resp = await _fetch_ph_or_default(client, playlists_url, fetch_sem)
                     if resp.status_code == 200:
                         _notify_bs4_spy_if_hooked(resp.text)
                         return await run_in_worker_pool(
-                            ("pornhub_playlists", final_url, resp.text, fallback_avatar),
+                            ("portal_tube_playlists", final_url, resp.text, fallback_avatar),
                             html_size=len(resp.content),
                         )
                     return None
@@ -704,7 +739,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         g_text = resp.text
 
                     base_gifs = await run_in_worker_pool(
-                        ("pornhub_gifs", final_url, g_text),
+                        ("portal_tube_gifs", final_url, g_text),
                         html_size=len(g_text.encode("utf-8", errors="ignore")),
                     )
                     c_gifs, r_gifs = list(base_gifs[0]), list(base_gifs[1])
@@ -716,7 +751,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                             if sub_resp.status_code == 200:
                                 _notify_bs4_spy_if_hooked(sub_resp.text)
                                 sub_gifs = await run_in_worker_pool(
-                                    ("pornhub_gifs", final_url, sub_resp.text),
+                                    ("portal_tube_gifs", final_url, sub_resp.text),
                                     html_size=len(sub_resp.content),
                                 )
                                 for cg, rg in zip(sub_gifs[0], sub_gifs[1]):
@@ -735,7 +770,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     if resp.status_code == 200 and "leastFactor" not in resp.text:
                         _notify_bs4_spy_if_hooked(resp.text)
                         return await run_in_worker_pool(
-                            ("pornhub_videos", final_url, resp.text),
+                            ("portal_tube_videos", final_url, resp.text),
                             html_size=len(resp.content),
                         )
                     return None
@@ -750,8 +785,8 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         return None
                     encoded_q = quote_plus(p_name.lower())
                     search_urls = [
-                        f"https://www.pornhub.com/gifs/search?search={encoded_q}&page={p}" if p > 1
-                        else f"https://www.pornhub.com/gifs/search?search={encoded_q}"
+                        f"https://portal-tube.example/gifs/search?search={encoded_q}&page={p}" if p > 1
+                        else f"https://portal-tube.example/gifs/search?search={encoded_q}"
                         for p in range(1, 6)
                     ]
                     try:
@@ -770,7 +805,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                                         total_reported = int(m_cnt.group(1).replace(",", ""))
                                 _notify_bs4_spy_if_hooked(pr.text)
                                 parsed_batch = await run_in_worker_pool(
-                                    ("pornhub_gifs", u, pr.text),
+                                    ("portal_tube_gifs", u, pr.text),
                                     html_size=len(pr.content),
                                 )
                                 for cg, rg in zip(parsed_batch[0], parsed_batch[1]):
@@ -831,10 +866,10 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         await _emit_partial()
                         await asyncio.sleep(0.4)
 
-            elif is_xhamster:
+            elif is_portal_state:
                 if isinstance(httpx.AsyncClient, type):
                     warm_worker_pool()
-                base_profile_url = normalize_xhamster_profile_base_url(final_url)
+                base_profile_url = normalize_portal_state_profile_base_url(final_url)
                 fallback_avatar = root_parsed.get("avatar") or ""
                 path_lower = urlsplit(final_url).path.rstrip("/").lower()
 
@@ -842,7 +877,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     shorts_url = f"{base_profile_url}/shorts"
                     if path_lower.endswith("/shorts"):
                         return await run_in_worker_pool(
-                            ("xhamster_shorts", final_url, html),
+                            ("portal_state_shorts", final_url, html),
                             html_size=len(html),
                         )
                     try:
@@ -850,7 +885,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         if resp.status_code == 200:
                             _notify_bs4_spy_if_hooked(resp.text)
                             return await run_in_worker_pool(
-                                ("xhamster_shorts", final_url, resp.text),
+                                ("portal_state_shorts", final_url, resp.text),
                                 html_size=len(resp.content),
                             )
                     except Exception:
@@ -861,7 +896,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     photos_url = f"{base_profile_url}/photos"
                     if path_lower.endswith("/photos"):
                         return await run_in_worker_pool(
-                            ("xhamster_albums", final_url, html),
+                            ("portal_state_albums", final_url, html),
                             html_size=len(html),
                         )
                     try:
@@ -869,7 +904,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         if resp.status_code == 200:
                             _notify_bs4_spy_if_hooked(resp.text)
                             return await run_in_worker_pool(
-                                ("xhamster_albums", final_url, resp.text),
+                                ("portal_state_albums", final_url, resp.text),
                                 html_size=len(resp.content),
                             )
                     except Exception:
@@ -882,7 +917,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
 
                 # Read the actual Videos/All videos tab before following its declared pages.
                 # Never infer page count or URL layout from an approximate source total.
-                catalog_complete = await collect_xhamster_catalog(
+                catalog_complete = await collect_state_catalog(
                     client, base_profile_url, html,
                     initial_videos=root_parsed.get("videos", ([], []))[0],
                     reported_total=root_parsed.get("total_videos_reported"),
@@ -898,7 +933,158 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                 if not isinstance(xh_shorts_res, Exception) and xh_shorts_res is not None:
                     gifs_html = xh_shorts_res
 
-            elif is_eporner:
+            elif is_video_portal and vp_conn is not None and vp_root_meta is not None:
+                entity_base = normalize_portal_entity_base_url(final_url, vp_conn) or final_url
+                ajax_base = vp_root_meta.get("ajaxBaseUrl") or entity_base
+                entity_kind = vp_root_meta.get("entityKind") or detect_portal_entity_kind(entity_base, vp_conn)
+                prof_cfg = vp_conn.profile or {}
+                vp_headers = vp_conn.default_headers(entity_base)
+                c_name = vp_root_meta.get("name") or ""
+                c_avatar = vp_root_meta.get("avatarUrl") or ""
+                collected_videos: list[dict] = []
+                collected_shorts: list[dict] = []
+                collected_albums: list[dict] = []
+                collected_playlists: list[dict] = []
+                total_videos_reported: int | None = None
+                vp_sem = asyncio.Semaphore(6)
+
+                async def _get_optional(u: str):
+                    async with vp_sem:
+                        try:
+                            return await client.get(u, headers=vp_headers)
+                        except Exception:
+                            return None
+
+                has_json_videos = bool(
+                    prof_cfg.get("videosJsonPathTemplate")
+                    and entity_kind in ("creator", "channel")
+                )
+                first_json_resp = None
+                if has_json_videos:
+                    p0_url = build_portal_entity_page_url(ajax_base, vp_conn, sort="best", page=1, section="videos")
+                    first_json_resp = await _get_optional(p0_url)
+
+                json_loaded = False
+                if first_json_resp is not None and first_json_resp.status_code == 200:
+                    try:
+                        p0_data = first_json_resp.json()
+                    except Exception:
+                        p0_data = None
+                    if isinstance(p0_data, dict):
+                        p0_items = parse_portal_video_json_items(
+                            p0_data,
+                            ajax_base,
+                            vp_conn,
+                            creator_name=c_name,
+                            creator_url=entity_base,
+                            creator_avatar=c_avatar,
+                        )
+                        if p0_items or prof_cfg.get("videosJsonKey", "videos") in p0_data:
+                            json_loaded = True
+                            collected_videos.extend(p0_items)
+                            nb_tot = p0_data.get(prof_cfg.get("totalVideosKey", "nb_videos"))
+                            nb_per = p0_data.get(prof_cfg.get("perPageKey", "nb_per_page")) or len(p0_items) or 36
+                            if isinstance(nb_tot, (int, float)) and nb_tot >= 0:
+                                total_videos_reported = int(nb_tot)
+                                max_p = min(30, max(1, math.ceil(total_videos_reported / max(1, int(nb_per)))))
+                            else:
+                                max_p = 1
+                            if max_p > 1:
+                                extra_urls = [
+                                    build_portal_entity_page_url(ajax_base, vp_conn, sort="best", page=p, section="videos")
+                                    for p in range(2, max_p + 1)
+                                ]
+                                extra_resps = await asyncio.gather(*(_get_optional(u) for u in extra_urls))
+                                for er in extra_resps:
+                                    if er is not None and er.status_code == 200:
+                                        try:
+                                            ed = er.json()
+                                            collected_videos.extend(
+                                                parse_portal_video_json_items(
+                                                    ed,
+                                                    ajax_base,
+                                                    vp_conn,
+                                                    creator_name=c_name,
+                                                    creator_url=entity_base,
+                                                    creator_avatar=c_avatar,
+                                                )
+                                            )
+                                        except Exception:
+                                            continue
+
+                if not json_loaded:
+                    collected_videos.extend(root_parsed.get("videos") or [])
+                    max_html_p = min(15, extract_portal_max_page(html, vp_conn))
+                    if max_html_p > 1:
+                        html_urls = [
+                            build_portal_entity_page_url(entity_base, vp_conn, page=p, section="html_grid")
+                            for p in range(2, max_html_p + 1)
+                        ]
+                        html_resps = await asyncio.gather(*(_get_optional(u) for u in html_urls))
+                        for hr in html_resps:
+                            if hr is not None and hr.status_code == 200:
+                                collected_videos.extend(parse_portal_video_cards(hr.text, str(hr.url), vp_conn))
+
+                async def _fetch_vp_shorts():
+                    if entity_kind not in ("creator", "channel") or not prof_cfg.get("shortsJsonPathTemplate"):
+                        return []
+                    su = build_portal_entity_page_url(ajax_base, vp_conn, sort="best", page=1, section="shorts")
+                    resp_s = await _get_optional(su)
+                    if resp_s is not None and resp_s.status_code == 200:
+                        try:
+                            return parse_portal_video_json_items(
+                                resp_s.json(),
+                                ajax_base,
+                                vp_conn,
+                                creator_name=c_name,
+                                creator_url=entity_base,
+                                creator_avatar=c_avatar,
+                            )
+                        except Exception:
+                            return []
+                    return []
+
+                async def _fetch_vp_albums():
+                    ap = str(prof_cfg.get("albumsPath") or "").strip()
+                    if not ap or entity_kind not in ("creator", "channel"):
+                        return []
+                    resp_a = await _get_optional(ajax_base.rstrip("/") + ap)
+                    if resp_a is not None and resp_a.status_code == 200:
+                        return parse_portal_albums(resp_a.text, str(resp_a.url), vp_conn)
+                    return []
+
+                async def _fetch_vp_playlists():
+                    pp = str(prof_cfg.get("playlistsPath") or "").strip()
+                    if not pp or entity_kind not in ("creator", "channel"):
+                        return []
+                    resp_p = await _get_optional(ajax_base.rstrip("/") + pp)
+                    if resp_p is not None and resp_p.status_code == 200:
+                        return parse_portal_playlists(resp_p.text, str(resp_p.url), vp_conn, fallback_avatar=c_avatar)
+                    return []
+
+                collected_shorts, collected_albums, collected_playlists = await asyncio.gather(
+                    _fetch_vp_shorts(),
+                    _fetch_vp_albums(),
+                    _fetch_vp_playlists(),
+                )
+
+                manifest = assemble_video_portal_profile(
+                    entity_base,
+                    vp_conn,
+                    vp_root_meta,
+                    videos=collected_videos,
+                    shorts=collected_shorts,
+                    albums=collected_albums,
+                    playlists=collected_playlists,
+                    total_videos_reported=total_videos_reported,
+                )
+                manifest["discovery_errors"] = discovery_errors
+                manifest["discovery_pending"] = False
+                if on_profile is not None:
+                    await on_profile(manifest)
+                return manifest
+
+            elif is_portal_grid:
                 if isinstance(httpx.AsyncClient, type):
                     warm_worker_pool()
                 first_video_urls = [v["originalUrl"] for v in root_parsed["videos"][0][:2] if v.get("originalUrl")]
@@ -909,7 +1095,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
 
                 page_urls = [f"{final_url.rstrip('/')}/{p}/" for p in range(2, max_video_page + 1)]
                 photos_url = urljoin(final_url.rstrip("/") + "/", "photos/")
-                playlists_url = f"https://www.eporner.com/search-playlists/{clean_slug}/"
+                playlists_url = f"https://portal-grid.example/search-playlists/{clean_slug}/"
 
                 # Overlapped fetch + worker pool extraction: each page is parsed by a worker
                 # as soon as its HTTP response completes, without waiting for slower pages.
@@ -922,7 +1108,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     if resp.status_code == 200:
                         _notify_bs4_spy_if_hooked(resp.text)
                         listing_parsed[id(resp)] = await run_in_worker_pool(
-                            ("eporner_videos", final_url, resp.text),
+                            ("portal_grid_videos", final_url, resp.text),
                             html_size=len(resp.content),
                         )
                     return resp
@@ -933,7 +1119,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     if resp.status_code == 200:
                         _notify_bs4_spy_if_hooked(resp.text)
                         extracted = await run_in_worker_pool(
-                            ("eporner_albums", final_url, resp.text),
+                            ("portal_grid_albums", final_url, resp.text),
                             html_size=len(resp.content),
                         )
                         listing_parsed[id(resp)] = extracted
@@ -947,7 +1133,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     if resp.status_code == 200:
                         _notify_bs4_spy_if_hooked(resp.text)
                         extracted = await run_in_worker_pool(
-                            ("eporner_playlists", final_url, str(resp.url), resp.text, fallback_avatar),
+                            ("portal_grid_playlists", final_url, str(resp.url), resp.text, fallback_avatar),
                             html_size=len(resp.content),
                         )
                         listing_parsed[id(resp)] = extracted
@@ -1015,7 +1201,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     client,
                     final_url,
                     html,
-                    extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                    extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                     item_key_fn=lambda item: item.get("originalUrl") or "",
                     initial_seen_keys={v.get("originalUrl") or "" for v in root_parsed["videos"][0] if v.get("originalUrl")},
                     max_batches=None if is_streaming else 35,
@@ -1026,7 +1212,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     client,
                     final_url,
                     html,
-                    extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                    extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                     item_key_fn=lambda item: item.get("originalUrl") or "",
                     initial_seen_keys={v.get("originalUrl") or "" for v in root_parsed["videos"][0] if v.get("originalUrl")},
                     max_batches=35,
@@ -1045,7 +1231,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         await collect_paginated_section(
                             client,
                             extra_video_tab_urls,
-                            extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                            extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                             item_key_fn=lambda item: item.get("originalUrl") or "",
                             max_pages=None,
                             concurrency=2,
@@ -1056,7 +1242,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         tab_video_batches, _ = await collect_paginated_section(
                             client,
                             extra_video_tab_urls,
-                            extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                            extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                             item_key_fn=lambda item: item.get("originalUrl") or "",
                             max_pages=20,
                             concurrency=10,
@@ -1083,7 +1269,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         extra_v_batches, _ = await collect_paginated_section(
                             client,
                             trailing_video_urls,
-                            extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                            extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                             item_key_fn=lambda item: item.get("originalUrl") or "",
                             max_pages=20,
                         )
@@ -1106,7 +1292,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         extra_alb_batches, _ = await collect_paginated_section(
                             client,
                             extra_album_urls,
-                            extract_fn=lambda p_url, p_html: extract_eporner_albums_lexbor(p_url, p_html),
+                            extract_fn=lambda p_url, p_html: extract_portal_grid_albums_lexbor(p_url, p_html),
                             item_key_fn=lambda item: item.get("url") or "",
                             max_pages=None if is_streaming else 15,
                         )
@@ -1121,7 +1307,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
 
                 playlists_html_list = []
                 # Include any playlist cards already rendered directly on the profile root page
-                root_pl_can, root_pl_raw, _ = extract_eporner_playlists_lexbor(
+                root_pl_can, root_pl_raw, _ = extract_portal_grid_playlists_lexbor(
                     final_url, final_url, html, fallback_avatar
                 )
                 if root_pl_can:
@@ -1149,7 +1335,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     tab_pl_batches, _ = await collect_paginated_section(
                         client,
                         extra_pl_urls,
-                        extract_fn=lambda p_url, p_html: extract_eporner_playlists_lexbor(
+                        extract_fn=lambda p_url, p_html: extract_portal_grid_playlists_lexbor(
                             final_url, p_url, p_html, fallback_avatar
                         )[:2],
                         item_key_fn=lambda item: item.get("url") or "",
@@ -1186,7 +1372,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
     manifest["discovery_pending"] = False
     if "profile_data" in manifest:
         for kind in discovery_errors:
-            if not (is_xhamster and kind == "videos"):
+            if not (is_portal_state and kind == "videos"):
                 manifest["profile_data"]["stats"][kind] = None
     start_catalog_prefetch(manifest, DEFAULT_HEADERS)
     return manifest
@@ -1245,8 +1431,18 @@ async def get_album_photos(request: AlbumPhotosRequest):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="A valid HTTP or HTTPS gallery URL is required")
 
+    host_lower = (parsed.hostname or "").lower()
+    if host_lower == "imgur.com" or host_lower.endswith(".imgur.com"):
+        from .timeline_search_providers import fetch_imgur_album_photos
+
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=DEFAULT_HEADERS) as client:
+            imgur_res = await fetch_imgur_album_photos(client, gallery_url)
+        if imgur_res:
+            imgur_res["page"] = request.page
+            return imgur_res
+
     # Dedicated fast path for global GIF search collections
-    is_gif_search = is_pornhub_host(gallery_url) and (
+    is_gif_search = is_portal_tube_host(gallery_url) and (
         "/gifs/search" in gallery_url
         or "/gifs?search=" in gallery_url
         or ("search=" in parsed.query and "/gifs" in parsed.path)
@@ -1260,7 +1456,7 @@ async def get_album_photos(request: AlbumPhotosRequest):
                 first.raise_for_status()
                 if not first.text or "leastFactor" in first.text:
                     raise HTTPException(status_code=502, detail={"code": "gif_search_unconfirmed"})
-                last_page = extract_pornhub_max_video_page(first.text)
+                last_page = extract_portal_tube_max_video_page(first.text)
                 if batch_start > last_page:
                     raise HTTPException(status_code=404, detail={"code": "gif_search_batch_unavailable"})
                 sem = asyncio.Semaphore(ALBUM_HTML_CONCURRENCY)
@@ -1283,7 +1479,7 @@ async def get_album_photos(request: AlbumPhotosRequest):
                     break
             for url in page_urls:
                 response = by_url[url]
-                parsed_page = await run_in_worker_pool(("pornhub_gifs", url, response.text), html_size=len(response.content))
+                parsed_page = await run_in_worker_pool(("portal_tube_gifs", url, response.text), html_size=len(response.content))
                 for item in parsed_page[0]:
                     key = item.get("id") or item.get("originalUrl") or item.get("thumbnailUrl")
                     if key and key not in seen_keys:
@@ -1300,6 +1496,40 @@ async def get_album_photos(request: AlbumPhotosRequest):
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail={"code": "gif_search_unavailable"}) from exc
 
+    # Single-HTML-page mode for multi-page forum threads or explicit pageUrl calls;
+    # preserves 20-page batch mode for multi-page photo galleries elsewhere.
+    explicit_page_url = (request.page_url or "").strip()
+    if is_forum_host(gallery_url) or explicit_page_url:
+        if explicit_page_url:
+            exp_parts = urlsplit(explicit_page_url)
+            if exp_parts.scheme not in ("http", "https") or exp_parts.netloc.lower() != parsed.netloc.lower():
+                raise HTTPException(status_code=400, detail="pageUrl must match album origin")
+            target_url = explicit_page_url
+        elif request.page > 1 and is_forum_host(gallery_url):
+            base_path = re.sub(r"/page\d+$", "", parsed.path.rstrip("/"))
+            target_url = f"{parsed.scheme}://{parsed.netloc}{base_path}/page{request.page}"
+        else:
+            target_url = gallery_url
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=DEFAULT_HEADERS) as client:
+                resp = await _fetch_ph_or_default(client, target_url)
+                resp.raise_for_status()
+                html = resp.text
+                final_url = str(resp.url)
+                payload_len = len(resp.content)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail={"code": "album_source_unavailable"}) from exc
+        parsed_res = await run_in_worker_pool(("album_page", html, final_url), html_size=payload_len)
+        current_pg = parsed_res.get("currentPage") or request.page
+        total_pgs = max(parsed_res.get("totalPages") or current_pg, current_pg)
+        has_more = bool(parsed_res.get("hasMore") or total_pgs > current_pg)
+        parsed_res["page"] = current_pg
+        parsed_res["totalPages"] = total_pgs
+        parsed_res["hasMore"] = has_more
+        parsed_res["nextPageUrl"] = parsed_res.get("nextPageUrl")
+        parsed_res["paginationComplete"] = not has_more
+        return parsed_res
+
     batch_start, batch_end = album_batch_bounds(request.page)
     extra_pages_html: list[tuple[str, int, str]] = []
     selected_page_urls: list[str] = []
@@ -1315,22 +1545,22 @@ async def get_album_photos(request: AlbumPhotosRequest):
             if not html or "leastFactor" in html:
                 raise HTTPException(status_code=502, detail={"code": "album_source_unconfirmed"})
             source_pages[1] = final_url
-            if is_pornhub_host(final_url):
+            if is_portal_tube_host(final_url):
                 base_alb_url = final_url.split("?")[0].rstrip("/")
                 if base_alb_url.endswith("/gifs") and any(seg in final_url for seg in ("/pornstar/", "/model/", "/channels/", "/users/")):
                     for sub in ("public", "video"):
                         if f"/gifs/{sub}" in html:
                             source_pages[len(source_pages) + 1] = f"{base_alb_url}/{sub}"
                 else:
-                    last_page = extract_pornhub_max_video_page(html)
+                    last_page = extract_portal_tube_max_video_page(html)
                     # Build only this request's batch, not a huge range of URLs.
                     for number in range(max(2, batch_start), min(last_page, batch_end) + 1):
                         source_pages[number] = album_query_page_url(final_url, number)
                     if last_page > batch_end:
                         source_pages[last_page] = album_query_page_url(final_url, last_page)
                 boundary_known = True
-            elif is_xhamster_host(final_url):
-                initials = _extract_xhamster_initials(html)
+            elif is_portal_state_host(final_url):
+                initials = _extract_window_initials(html)
                 gp = initials.get("galleryPage", {})
                 pagination = gp.get("paginationProps", {})
                 pagination = pagination if isinstance(pagination, dict) else {}
@@ -1360,7 +1590,7 @@ async def get_album_photos(request: AlbumPhotosRequest):
                     if text.isdigit() and "last" in (link.attributes.get("rel") or "").split():
                         boundary_known = True
             last_known_page = max(source_pages)
-            if not is_pornhub_host(final_url) and not is_xhamster_host(final_url):
+            if not is_portal_tube_host(final_url) and not is_portal_state_host(final_url):
                 for number in range(batch_start, min(last_known_page, batch_end) + 1):
                     if number not in source_pages:
                         candidate = album_link_page_url(source_pages, number)
@@ -1392,10 +1622,10 @@ async def get_album_photos(request: AlbumPhotosRequest):
                 seen_keys.add(key)
                 photos.append(item)
 
-    if is_pornhub_host(final_url) and photos and any(p.get("type") == "gif" for p in photos):
+    if is_portal_tube_host(final_url) and photos and any(p.get("type") == "gif" for p in photos):
         # Fast concurrent probe to drop legacy 410 Gone / 404 dead media cards
         verify_sem = asyncio.Semaphore(16)
-        async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.pornhub.com/"}) as v_client:
+        async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://portal-tube.example/"}) as v_client:
             async def _is_live(p_item):
                 thumb = p_item.get("thumbnailUrl")
                 if not thumb:
@@ -1417,14 +1647,14 @@ async def get_album_photos(request: AlbumPhotosRequest):
             verified = await asyncio.gather(*(_is_live(p) for p in photos))
             photos = [p for p in verified if p is not None]
 
-    if is_pornhub_host(final_url) and photos:
+    if is_portal_tube_host(final_url) and photos:
         for p_item in photos:
             orig = p_item.get("originalUrl") or ""
-            if orig and ("phncdn.com" in orig or is_pornhub_host(final_url)):
+            if orig and ("cdn.portal-tube.example" in orig or is_portal_tube_host(final_url)):
                 if p_item.get("format") in ("mp4", "webm") or ".mp4" in orig:
-                    p_item["streamUrl"] = f"/api/proxy-video-stream?url={quote(orig)}&referer=https://www.pornhub.com/"
+                    p_item["streamUrl"] = f"/api/proxy-video-stream?url={quote(orig)}&referer=https://portal-tube.example/"
                 else:
-                    p_item["streamUrl"] = f"/api/proxy-image?url={quote(orig)}&referer=https://www.pornhub.com/"
+                    p_item["streamUrl"] = f"/api/proxy-image?url={quote(orig)}&referer=https://portal-tube.example/"
 
     first_res["photos"] = photos
     first_res["count"] = len(photos)
@@ -1467,7 +1697,34 @@ async def get_playlist_videos(request: PlaylistVideosRequest):
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Could not load playlist: {exc}") from exc
 
-    return await run_in_worker_pool(("playlist_page", html, final_url), html_size=payload_len)
+    res = await run_in_worker_pool(("playlist_page", html, final_url), html_size=payload_len)
+    vp_conn = find_connector_for_url(final_url)
+    if isinstance(vp_conn, VideoPortalDescriptor) and isinstance(res, dict):
+        max_page = min(10, int(res.get("maxPage") or 1))
+        if max_page > 1:
+            canon_pl = canonicalize_portal_url(final_url, vp_conn) or final_url
+            zero_based = bool((vp_conn.profile or {}).get("playlistPageBaseZero", True))
+            videos = list(res.get("videos") or [])
+            seen_u = {v.get("originalUrl") for v in videos if v.get("originalUrl")}
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=vp_conn.default_headers(canon_pl)) as client:
+                extra_urls = [
+                    f"{canon_pl.rstrip('/')}/{p - 1 if zero_based else p}"
+                    for p in range(2, max_page + 1)
+                ]
+                extra_resps = await asyncio.gather(*(client.get(u) for u in extra_urls), return_exceptions=True)
+                for er in extra_resps:
+                    if not isinstance(er, Exception) and getattr(er, "status_code", 0) == 200:
+                        parsed_extra = parse_portal_playlist_videos(er.text, str(er.url), vp_conn)
+                        for v in parsed_extra.get("videos") or []:
+                            vu = v.get("originalUrl")
+                            if vu and vu not in seen_u:
+                                seen_u.add(vu)
+                                videos.append(v)
+            res["videos"] = videos
+            res["count"] = len(videos)
+            rep = res.get("reportedCount")
+            res["paginationComplete"] = rep is not None and len(videos) >= rep
+    return res
 
 
 @router.post("/batch-save")

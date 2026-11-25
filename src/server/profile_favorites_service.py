@@ -39,9 +39,39 @@ def set_favorite_profile(profile_data: Dict[str, Any], favorited: bool) -> Dict[
         raise ValueError("A valid HTTP profile URL is required")
     with _favorites_lock:
         profiles = load_favorite_profiles(strict=True)
-        existing = next((value for value in profiles if _clean_url(value.get("url", "")) == url), None)
+        existing_idx = next((idx for idx, value in enumerate(profiles) if _clean_url(value.get("url", "")) == url), -1)
+        existing = profiles[existing_idx] if existing_idx >= 0 else None
         if favorited and existing is None:
             return toggle_favorite_profile(profile_data)
+        if favorited and existing is not None:
+            updated = dict(existing)
+            if isinstance(profile_data.get("name"), str) and profile_data["name"].strip():
+                updated["name"] = profile_data["name"].strip()
+            for src_key, dst_key in (
+                ("handle", "handle"),
+                ("avatar_url", "avatar_url"),
+                ("avatarUrl", "avatar_url"),
+                ("cover_url", "cover_url"),
+                ("coverUrl", "cover_url"),
+                ("banner_url", "banner_url"),
+                ("bannerUrl", "banner_url"),
+                ("entity_kind", "entity_kind"),
+                ("entityKind", "entity_kind"),
+                ("source", "source"),
+            ):
+                val = profile_data.get(src_key)
+                if isinstance(val, str) and val.strip():
+                    updated[dst_key] = val.strip()
+            if isinstance(profile_data.get("stats"), dict) and profile_data["stats"]:
+                updated["stats"] = profile_data["stats"]
+            if isinstance(profile_data.get("portal_info"), dict) and profile_data["portal_info"]:
+                updated["portal_info"] = profile_data["portal_info"]
+            if isinstance(profile_data.get("verified"), bool):
+                updated["verified"] = profile_data["verified"]
+            if updated != existing:
+                profiles[existing_idx] = updated
+                save_favorite_profiles(profiles)
+            return {"favorited": True, "url": url, "profile": updated, "total": len(profiles)}
         if not favorited and existing is not None:
             remove_favorite_profile(url)
         return {"favorited": favorited, "url": url, "profile": existing, "total": len(load_favorite_profiles())}
@@ -124,8 +154,17 @@ def toggle_favorite_profile(profile_data: Dict[str, Any]) -> Dict[str, Any]:
             "cover_url": profile_data.get("cover_url")
             or profile_data.get("coverUrl")
             or "",
+            "banner_url": profile_data.get("banner_url")
+            or profile_data.get("bannerUrl")
+            or "",
+            "entity_kind": profile_data.get("entity_kind")
+            or profile_data.get("entityKind")
+            or "",
+            "source": profile_data.get("source") or "",
+            "verified": bool(profile_data.get("verified", False)),
             "added_at": profile_data.get("added_at") or int(time.time()),
             "stats": profile_data.get("stats") or {},
+            "portal_info": profile_data.get("portal_info") or profile_data.get("portalInfo") or {},
         }
         profiles.insert(0, new_entry)
         save_favorite_profiles(profiles)

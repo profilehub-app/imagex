@@ -38,7 +38,7 @@ frontend-mobile-preview/src/components/video-player/
 │   ├── useUniversalVideoEngine.ts   # Headless HTML5 + hls.js + Safari native lifecycle, 20s timeout, stream renewal, snapshot handoff
 │   ├── usePlayerControlsAutoHide.ts # Unified 2500ms idle timer + freeze locks (paused, menuOpen, scrubbing, toolbarHovered, focusWithin)
 │   ├── usePlayerGestures.ts         # Double-tap ±10s combo, hold-350ms 2x (canceled on >10px move), vertical fine scrub, vertical fullscreen swipe
-│   ├── usePlayerShortcuts.ts        # Full YouTube-style shortcuts gated against typing elements + active overlay stack
+│   ├── usePlayerShortcuts.ts        # Playback shortcuts gated against typing elements + active overlay stack
 │   ├── useMediaSession.ts           # OS lockscreen metadata, hardware keys & opt-in enterpictureinpicture Auto-PiP
 │   ├── useExternalPictureInPicture.ts # Document PiP (Desktop Chromium/Firefox HTTPS/localhost) + Classic OS PiP fallback (iOS/Android/Safari)
 │   └── playerOverlayStack.ts        # Capture-phase Escape stack manager (Menu > Sheet > Shortcuts > Fullscreen > Watch > Modal > Mini-Player)
@@ -111,7 +111,7 @@ Every invariant below documents **What It Does**, **Why It Exists**, and **Do-No
      - Standard web DOM elements **cannot** float over other OS applications or slide onto the physical phone screen edge outside the browser/WebView frame. **Never attempt undocumented host/OS window hacks.**
      - Instead, `<FloatingMiniPlayer />` delegates OS-level "hide to side of screen outside the app" to standard browser/OS PiP (`useExternalPictureInPicture.ts`):
        - **Desktop Chromium / Edge / pywebview (WebView2 >= 116) & Firefox (>= 151) over HTTPS or `localhost`:** Prefer **Document Picture-in-Picture (`window.documentPictureInPicture.requestWindow()`)** to launch a true OS always-on-top window carrying the app's themed controls (`Prev`, `-10s`, `Play/Pause`, `+10s`, `Next`, scrubber, `Return to App`).
-       - **Safari macOS, iOS 13.4+ Safari, Android Chrome & Fallback Runtimes:** Use Classic Element PiP (`video.requestPictureInPicture()` / WebKit `webkitSetPresentationMode('picture-in-picture')`). On **iOS and Android**, native OS PiP automatically lets the user drag and **stash/hide the floating video to the left/right screen edge** while background audio continues—matching YouTube Mobile OS behavior.
+       - **Safari macOS, iOS 13.4+ Safari, Android Chrome & Fallback Runtimes:** Use Classic Element PiP (`video.requestPictureInPicture()` / WebKit `webkitSetPresentationMode('picture-in-picture')`). On **iOS and Android**, native OS PiP automatically lets the user drag and **stash/hide the floating video to the left/right screen edge** while background audio continues.
        - **Auto-PiP on App/Tab Switch:** Register `navigator.mediaSession.setActionHandler('enterpictureinpicture', ...)` behind an explicit user setting (`autoPipOnTabSwitch`, Chromium desktop `enterpictureinpicture` support check). Always expose an explicit manual PiP button as fallback where mobile browsers forbid background Auto-PiP without a fresh gesture.
 
 ### 8. Visual Themes (`--tl-*`), Ambient Glow, Reduced Motion & 100% i18n

@@ -32,6 +32,9 @@ data/cache/*
 !data/videos/.gitkeep
 
 # Root-level debug/test scripts and temporary folders
+/debug.log
+/docs/prototypes/
+/frontend-mobile-preview/public/timeline_data.json
 find_box.py
 print_buttons.py
 /test_*.py
@@ -103,6 +106,10 @@ data/favorite_profile_videos.json
 scripts/poc_moment_intelligence/
 
 data/local_profile_examples.json
+config/*.local.json
+*.local.json
+docs/superpowers/
+/promo/
 
 # Keep personal runtime data and audit captures out of repository updates.
 /data/

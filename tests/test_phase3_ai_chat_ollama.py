@@ -211,7 +211,7 @@ async def test_chat_api_gemini_contents_sanitization_first_turn_user(monkeypatch
                 "provider": "gemini",
                 "model": "gemini-3.7-flash",
                 "conversation_history": [
-                    {"role": "assistant", "content": "Olá! Sou o Co-Pilot IMAGEX.AI."},
+                    {"role": "assistant", "content": "Olá! Sou o Co-Pilot IMAGEX."},
                     {"role": "user", "content": "Primeira pergunta do usuário"},
                     {"role": "user", "content": "Adicional à primeira pergunta"}
                 ]

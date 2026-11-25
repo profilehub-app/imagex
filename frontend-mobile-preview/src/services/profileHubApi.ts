@@ -31,6 +31,7 @@ export interface ProfileScanResponse {
   canonical_highlights?: HighlightItem[];
   canonical_playlists?: PlaylistItem[];
   canonical_albums?: AlbumItem[];
+  canonical_posts?: unknown[];
   canonical_videos?: MediaItemCard[];
   canonical_gifs?: MediaItemCard[];
   playlist_videos_map?: Record<string, MediaItemCard[]>;
@@ -172,16 +173,25 @@ export async function discoverRecentProfileRoot(
   knownVideoUrls: string[] = [],
   knownMediaUrls: string[] = [],
   onProfile?: (profile: ProfileRoot) => void,
+  page?: number,
+  sort?: string,
 ): Promise<ProfileScanResponse> {
+  const payload: Record<string, unknown> = {
+    url,
+    expected_name: expectedProfileName,
+    known_video_urls: knownVideoUrls,
+    known_media_urls: knownMediaUrls,
+  };
+  if (typeof page === 'number' && page > 1) {
+    payload.page = page;
+  }
+  if (typeof sort === 'string' && sort.trim()) {
+    payload.sort = sort.trim();
+  }
   const options: RequestInit = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url,
-      expected_name: expectedProfileName,
-      known_video_urls: knownVideoUrls,
-      known_media_urls: knownMediaUrls,
-    }),
+    body: JSON.stringify(payload),
     signal,
   };
   let response = await fetch(onProfile ? '/api/profile-hub/recent-stream' : '/api/profile-hub/recent', options);
@@ -247,13 +257,26 @@ export async function discoverProfileRoot(
 export interface AlbumPhotosResult {
   photos: MediaItemCard[];
   metadata: Partial<AlbumItem>;
+  page?: number;
+  totalPages?: number;
+  hasMore?: boolean;
+  nextPageUrl?: string | null;
 }
 
-export async function fetchAlbumPhotos(url: string, signal?: AbortSignal, page: number = 1): Promise<AlbumPhotosResult> {
+export async function fetchAlbumPhotos(
+  url: string,
+  signal?: AbortSignal,
+  page: number = 1,
+  options?: { pageUrl?: string | null }
+): Promise<AlbumPhotosResult> {
+  const payload: Record<string, unknown> = { url, page };
+  if (options?.pageUrl) {
+    payload.pageUrl = options.pageUrl;
+  }
   const response = await fetch('/api/profile-hub/album-photos', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, page }),
+    body: JSON.stringify(payload),
     signal,
   });
   if (!response.ok) {
@@ -263,6 +286,10 @@ export async function fetchAlbumPhotos(url: string, signal?: AbortSignal, page: 
   const data = await response.json();
   return {
     photos: (data.photos || []) as MediaItemCard[],
+    page: typeof data.page === 'number' ? data.page : page,
+    totalPages: typeof data.totalPages === 'number' ? data.totalPages : 1,
+    hasMore: typeof data.hasMore === 'boolean' ? data.hasMore : Boolean(data.nextPageUrl),
+    nextPageUrl: typeof data.nextPageUrl === 'string' ? data.nextPageUrl : null,
     metadata: {
       metadataStatus: data.metadataStatus,
       author: data.author ?? undefined, authorUrl: data.authorUrl ?? undefined,
@@ -289,6 +316,7 @@ export interface PhotoResolveResult {
   file_size: number;
   format: string;
   is_resolved: boolean;
+  requires_proxy?: boolean;
   elapsed_seconds: number;
 }
 

@@ -84,12 +84,14 @@ async def lookup_metadata(url, kind, headers):
                     html_text = response.text
                     final_url = str(response.url)
                     payload_len = len(response.content)
-                    if "pornhub.com" in url.lower() and "leastFactor" in html_text:
+                    if "leastFactor" in html_text:
                         from .profile_directory_transport import solve_js_challenge
                         solved = await asyncio.to_thread(solve_js_challenge, html_text)
                         if solved:
+                            apex_host = (urlsplit(url).hostname or "").lower().removeprefix("www.")
+                            cookie_domains = (f".{apex_host}", apex_host, f"www.{apex_host}") if apex_host else ()
                             for k, v in solved.items():
-                                for domain in (".pornhub.com", "pornhub.com", "www.pornhub.com"):
+                                for domain in cookie_domains:
                                     try:
                                         client.cookies.set(k.strip(), v.strip(), domain=domain)
                                     except Exception:

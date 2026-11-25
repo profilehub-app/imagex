@@ -1,32 +1,18 @@
-# ⚡ IMAGEX v5.7.0
+# ⚡ IMAGEX v5.8.0
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀🔍
 
+🌐 **[Website & Download](https://profilehub-app.github.io/imagex/)** • 💬 **[Discord Community](https://discord.gg/mJdcBcpsd2)** • ☕ **[Support on Ko-fi](https://ko-fi.com/imagexapp)**
+
 ---
 
-## ✨ What's new in v5.7.0
+## ✨ What's new in v5.8.0
 
-- Profile Hub: explore creator profiles, videos, albums and playlists in one integrated experience.
-- Saved directories and favorites: keep shortcuts and find profiles more easily.
-- Update alerts: notifications and Settings indicators when a new version is available.
-- Feedback: send problems or suggestions from the menu, with an optional screenshot, when the service is configured.
-- Selection and review: choose media and destinations per profile, then review the batch before saving.
-- Timeline: browse recent posts and open profiles and collections while keeping your place.
-- Watch: play videos, explore related content and read comments and replies from the source.
-- Updated player: consistent controls, a floating mini-player and picture-in-picture on supported devices.
-- More convenient controls: keyboard shortcuts, touch gestures, speed, quality and fullscreen.
+- Timeline brings together the sources you add and the local batches you select. New installations start with an empty feed.
+- Search, source controls and creator navigation are easier to reach on smaller screens.
+- Explore and its dialogs follow the selected app theme.
 
-## 🛠️ Improvements and fixes
-
-- Playback: improved video recovery and continuity when switching screens or using the mini-player.
-- Mobile player: responsive controls, larger touch targets and easier-to-use menus.
-- Navigation: fixes to preserve context and scroll position when returning from videos and profiles.
-- Timeline: improvements to post refresh, displayed dates and duplicate prevention.
-- Profiles and comments: improved avatar loading and handling of temporary failures.
-- Favorites and directories: improved persistence and synchronization of saved shortcuts.
-- Performance: progressive loading of profiles and collections, with improved metadata processing.
-
-Available features vary by source and device.
+[Read the full release notes in English and Portuguese](docs/release-notes-v5.8.0.md).
 
 ---
 
@@ -152,13 +138,13 @@ python -m src.main "https://example.com/gallery" --headed
 #### 4. Portable Executable (No Python Required) 📦
 1. Download `IMAGEX-Windows.zip` from the GitHub **Releases** tab.
 2. Extract the archive anywhere on Windows.
-3. Double-click `IMAGEX.exe` to run.
+3. Run `IMAGEX.exe`.
 
 ---
 
 ### 🛠️ Installation & Setup from Source
 
-If setting up the project from scratch:
+Install Python 3.11 or later and Node.js 20 or later first. Run these commands from the repository root in PowerShell.
 
 ```powershell
 # 1. Create and activate a virtual environment
@@ -166,12 +152,18 @@ python -m venv venv
 .\venv\Scripts\activate
 
 # 2. Install Python dependencies
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 # 3. Install Playwright Chromium browser
 python -m playwright install chromium
 
-# 4. Start the application
+# 4. Build the frontend
+Push-Location frontend-mobile-preview
+npm ci
+npm run build
+Pop-Location
+
+# 5. Start the application
 python -m src.main
 ```
 
@@ -179,11 +171,25 @@ To develop the frontend, start the server on port 8100 in one terminal and run
 `npm install` followed by `npm run dev` inside `frontend-mobile-preview` in
 another. Vite forwards API requests to `http://127.0.0.1:8100`.
 
+### Sources in Timeline
+
+Open **Timeline** and paste any supported website, channel, or creator link in
+**Integrated Networks** (`Sources` on mobile). New installations start empty with
+zero pre-installed feeds:
+
+- Pasting a link automatically detects the site structure (video portals, gallery
+  catalogs, forum boards, and supported social feeds) and saves the local
+  connector configuration automatically into `config/connectors.local.json`.
+- You can also import or export custom `connectors.local.json` bundles directly
+  from the Sources sheet, or use `config/connectors.example.json` as a reference
+  template.
+- Or import a local Timeline JSON batch and choose which items to show.
+
 ---
 
 ### ⚙️ How to Build the Executable (.exe) 🔨
 
-To compile the frontend with Vite and package everything into `dist/main.exe`:
+To compile the frontend with Vite and package everything into `dist/IMAGEX.exe`:
 
 1. Simply double-click the **`build_executable.bat`** script in the project root.
 2. The script will automatically:
@@ -252,13 +258,13 @@ python -m src.main "https://exemplo.com/galeria" --headed
 #### 4. Executável Portátil (Sem precisar de Python) 📦
 1. Baixe o arquivo `IMAGEX-Windows.zip` na aba de **Releases** do GitHub.
 2. Extraia a pasta em qualquer lugar do Windows.
-3. Dê dois cliques em `IMAGEX.exe` para rodar.
+3. Execute `IMAGEX.exe`.
 
 ---
 
 ### 🛠️ Como Instalar e Rodar pelo Código-Fonte
 
-Caso esteja configurando o projeto do zero:
+Instale o Python 3.11 ou posterior e o Node.js 20 ou posterior. Execute os comandos na raiz do repositório, no PowerShell.
 
 ```powershell
 # 1. Criar e ativar o ambiente virtual
@@ -266,12 +272,18 @@ python -m venv venv
 .\venv\Scripts\activate
 
 # 2. Instalar dependências Python
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 # 3. Instalar o navegador Chromium do Playwright
 python -m playwright install chromium
 
-# 4. Iniciar a aplicação
+# 4. Compilar a interface
+Push-Location frontend-mobile-preview
+npm ci
+npm run build
+Pop-Location
+
+# 5. Iniciar a aplicação
 python -m src.main
 ```
 
@@ -279,11 +291,24 @@ Para desenvolver o frontend, inicie o servidor na porta 8100 em um terminal e
 execute `npm install` e `npm run dev` dentro de `frontend-mobile-preview` em
 outro. O Vite encaminha as chamadas da API para `http://127.0.0.1:8100`.
 
+### Fontes na Timeline
+
+Abra a **Timeline** e cole o link de qualquer site, canal ou criador suportado em
+**Redes Integradas** (`Fontes` no celular). Instalações novas começam vazias, sem
+feeds pré-cadastrados:
+
+- Ao colar um link, o app detecta automaticamente a estrutura do site (portais de
+  vídeo, catálogos de galerias, fóruns e redes sociais suportadas) e salva a
+  configuração local em `config/connectors.local.json`.
+- Também é possível importar ou exportar arquivos `connectors.local.json` direto
+  pela tela de Fontes, ou usar `config/connectors.example.json` como modelo.
+- Você também pode importar um lote JSON local da Timeline e escolher o que exibir.
+
 ---
 
 ### ⚙️ Como Compilar o Executável (.exe) 🔨
 
-Para compilar o frontend com Vite e empacotar tudo no `dist/main.exe`:
+Para compilar o frontend com Vite e empacotar tudo no `dist/IMAGEX.exe`:
 
 1. Basta dar dois cliques no script **`build_executable.bat`** na raiz do projeto.
 2. O script vai automaticamente:

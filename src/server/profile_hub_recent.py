@@ -17,6 +17,27 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from selectolax.lexbor import LexborHTMLParser
 
+from .connector_registry import (
+    CatalogDescriptor,
+    ForumDescriptor,
+    VideoPortalDescriptor,
+    find_connector_for_url,
+)
+from .forum_board_engine import _abs_board_url, parse_board_threads, parse_forum_thread_page
+from .gallery_catalog_engine import detect_catalog_entity_kind, read_catalog_entity_profile
+from .video_portal_engine import (
+    allows_portal_profile_path,
+    build_portal_entity_page_url,
+    detect_portal_entity_kind,
+    extract_portal_max_page,
+    normalize_portal_entity_base_url,
+    parse_portal_albums,
+    parse_portal_playlists,
+    parse_portal_profile_root,
+    parse_portal_video_cards,
+    parse_portal_video_json_items,
+)
+from .original_image_resolver import is_placeholder_media_url
 from .profile_directory_manifest import ADAPTERS
 from .profile_directory_transport import DEFAULT_TRANSPORT_HEADERS, MAX_REDIRECTS, REQUEST_TIMEOUT, DirectoryFetchError, _read_bounded_listing
 from .profile_hub_execution import https_url
@@ -29,14 +50,15 @@ from .profile_hub_pagination import (
     discover_profile_section_urls,
 )
 from .profile_hub_workers import (is_youtube_channel_url, normalize_youtube_channel_base_url,
-    extract_eporner_albums_lexbor, extract_eporner_playlists_lexbor, extract_eporner_videos_lexbor,
-    extract_pornhub_albums_lexbor, extract_pornhub_gifs_lexbor, extract_pornhub_playlists_lexbor,
-    extract_pornhub_max_video_page, extract_pornhub_videos_lexbor,
-    extract_xhamster_max_video_page, extract_xhamster_videos_lexbor,
-    extract_youtube_playlists_lexbor, extract_youtube_videos_lexbor,
-    normalize_pornhub_profile_base_url, normalize_xhamster_profile_base_url)
-from .profile_hub_workers import _extract_xhamster_initials, _extract_yt_initial_data
-from .profile_hub_publication_dates import enrich_publication_dates, enrich_pornhub_publication_dates
+    extract_portal_grid_albums_lexbor, extract_portal_grid_playlists_lexbor, extract_portal_grid_videos_lexbor,
+    extract_portal_tube_albums_lexbor, extract_portal_tube_gifs_lexbor, extract_portal_tube_playlists_lexbor,
+    extract_portal_tube_max_video_page, extract_portal_tube_videos_lexbor,
+    extract_portal_state_max_video_page, extract_portal_state_videos_lexbor,
+    extract_youtube_albums_lexbor, extract_youtube_playlists_lexbor, extract_youtube_videos_lexbor,
+    http_url as _lexbor_http_url, image_url as _lexbor_image_url, parse_album_page_lexbor,
+    normalize_portal_tube_profile_base_url, normalize_portal_state_profile_base_url)
+from .profile_hub_workers import _extract_window_initials, _extract_yt_initial_data
+from .profile_hub_publication_dates import enrich_publication_dates, enrich_portal_tube_publication_dates
 
 logger = logging.getLogger(__name__)
 
@@ -50,20 +72,22 @@ class RecentProfileRequest(BaseModel):
     expected_name: str | None = None
     known_video_urls: list[str] = Field(default_factory=list)
     known_media_urls: list[str] = Field(default_factory=list)
+    page: int = 1
+    sort: str | None = None
 
 
-_EPORNER_HOSTS = frozenset({'eporner.com', 'www.eporner.com'})
-_EPORNER_USER_PROFILE_PATH = re.compile(r'/(?:profile|channel)/[A-Za-z0-9_-]+/?\Z')
-_PORNHUB_PROFILE_PATH = re.compile(
+_PORTAL_GRID_HOSTS = frozenset({'portal-grid.example', 'www.portal-grid.example'})
+_PORTAL_GRID_USER_PROFILE_PATH = re.compile(r'/(?:profile|channel)/[A-Za-z0-9_-]+/?\Z')
+_PORTAL_TUBE_PROFILE_PATH = re.compile(
     r'/(?:pornstar|model|channels|users)/[A-Za-z0-9_-]+(?:/(?:videos|photos|playlists|gifs|about|stream))?/?\Z',
     re.I,
 )
 
 
-def _is_eporner_user_profile_url(url: str) -> bool:
+def _is_portal_grid_user_profile_url(url: str) -> bool:
     parts = urlsplit(url)
     host = (parts.hostname or '').lower()
-    valid_host = host == 'eporner.com' or host.endswith('.eporner.com')
+    valid_host = host == 'portal-grid.example' or host.endswith('.portal-grid.example')
     return (
         parts.scheme == 'https'
         and valid_host
@@ -72,14 +96,14 @@ def _is_eporner_user_profile_url(url: str) -> bool:
         and not parts.password
         and not parts.query
         and not parts.fragment
-        and bool(_EPORNER_USER_PROFILE_PATH.fullmatch(parts.path))
+        and bool(_PORTAL_GRID_USER_PROFILE_PATH.fullmatch(parts.path))
     )
 
 
-def _is_pornhub_profile_route(url: str) -> bool:
+def _is_portal_tube_profile_route(url: str) -> bool:
     parts = urlsplit(url)
     host = (parts.hostname or '').lower()
-    valid_host = host == 'pornhub.com' or host.endswith('.pornhub.com')
+    valid_host = host == 'portal-tube.example' or host.endswith('.portal-tube.example')
     return (
         parts.scheme == 'https'
         and valid_host
@@ -87,7 +111,7 @@ def _is_pornhub_profile_route(url: str) -> bool:
         and not parts.username
         and not parts.password
         and not parts.fragment
-        and bool(_PORNHUB_PROFILE_PATH.fullmatch(parts.path))
+        and bool(_PORTAL_TUBE_PROFILE_PATH.fullmatch(parts.path))
     )
 
 
@@ -98,14 +122,48 @@ def _same_resource_url(left: str, right: str) -> bool:
     )
 
 
+def _detect_visual_entity_kind(url: str, conn: CatalogDescriptor | ForumDescriptor | VideoPortalDescriptor) -> str:
+    path = (urlsplit(url).path or '/').lower()
+    if isinstance(conn, VideoPortalDescriptor):
+        return detect_portal_entity_kind(url, conn)
+    if isinstance(conn, CatalogDescriptor):
+        return detect_catalog_entity_kind(url, conn)
+    if '/threads/' in path:
+        return 'thread'
+    if '/forums/' in path:
+        return 'subforum'
+    return 'creator'
+
+
 def recent_source(url):
     safe = https_url(url)
     if is_youtube_channel_url(safe):
         return 'youtube'
-    if _is_eporner_user_profile_url(safe):
-        return 'eporner'
-    if _is_pornhub_profile_route(safe):
-        return 'pornhub'
+    if _is_portal_grid_user_profile_url(safe):
+        return 'portal_grid'
+    if _is_portal_tube_profile_route(safe):
+        return 'portal_tube'
+    conn = find_connector_for_url(safe)
+    if isinstance(conn, VideoPortalDescriptor):
+        path = urlsplit(safe).path or '/'
+        if allows_portal_profile_path(path, conn):
+            return conn.id
+    elif isinstance(conn, CatalogDescriptor):
+        path = (urlsplit(safe).path or '/').lower()
+        album_seg = str(conn.browse.get('albumPathSegment') or '').lower()
+        if not any(path.startswith(bad) for bad in ('/search/', '/popular/', '/recent/', '/rating/', '/likes/', '/views/', '/page/')) and not (album_seg and album_seg in path):
+            return conn.id
+    elif isinstance(conn, ForumDescriptor):
+        path = (urlsplit(safe).path or '/').lower()
+        if any(seg in path for seg in ('/threads/', '/forums/', '/members/')):
+            return conn.id
+    try:
+        from .profile_directory_manifest import recognize_profile_input
+        adapter, kind = recognize_profile_input(safe)
+        if kind == 'profile':
+            return adapter.adapter_id
+    except Exception:
+        pass
     adapter = next((adapter for adapter in ADAPTERS if adapter.recognize(safe) == 'profile'), None)
     if adapter is None:
         raise ValueError('Recent publication discovery is not installed for this source')
@@ -120,7 +178,7 @@ def recent_video_link(source_url, html, source):
     base = urlsplit(source_url)
     base_path = base.path.rstrip('/')
     prefix = base_path + '/'
-    if source == 'xhamster':
+    if source == 'portal_state':
         # This source publishes its sort links in window.initials, rather than
         # anchors. Follow the declared Newest destination within this profile;
         # never infer a sort URL from the slug or accept a global listing.
@@ -133,7 +191,7 @@ def recent_video_link(source_url, html, source):
             elif isinstance(value, list):
                 for child in value:
                     yield from declared_latest(child)
-        for href in declared_latest(_extract_xhamster_initials(html)):
+        for href in declared_latest(_extract_window_initials(html)):
             target = urljoin(source_url, href)
             parts = urlsplit(target)
             if (parts.scheme == 'https' and parts.netloc == base.netloc
@@ -145,7 +203,7 @@ def recent_video_link(source_url, html, source):
             continue
         href = anchor.attributes.get('href', '')
         if href == '#':
-            # The Eporner source exposes the destination as a literal navigation
+            # The PortalGrid source exposes the destination as a literal navigation
             # argument. Accept only that literal, not arbitrary JS expressions.
             match = re.fullmatch(r"\s*return EP\.page\.topBelNav\((['\"])(/[^'\"<>]*)\1\);?\s*", anchor.attributes.get('onclick', ''))
             href = match[2] if match else ''
@@ -169,7 +227,7 @@ def profile_media_link(source_url, html, tab):
 
 
 def photo_source_identity(url, profile_url):
-    """Eporner gallery/photo IDs are case-sensitive; slugs are presentation.
+    """PortalGrid gallery/photo IDs are case-sensitive; slugs are presentation.
 
     Only recognize this adapter's paths on the already verified source host.
     Never apply trailing-slash/slug equivalence to arbitrary media URLs.
@@ -189,7 +247,7 @@ async def read_recent_albums(root_url, root_html, source, client, known_media_ur
     Listing order proves which page was selected, not an individual publication
     date. Gallery creation/last-update semantics remain unknown when absent.
     """
-    if source != 'eporner':
+    if source != 'portal_grid':
         return None
     tab = profile_media_link(root_url, root_html, 'photos') or profile_media_link(root_url, root_html, 'uploaded-pics')
     if not tab:
@@ -209,7 +267,7 @@ async def read_recent_albums(root_url, root_html, source, client, known_media_ur
         raise ValueError('Source latest-photo listing could not be verified')
     # The shared parser also supports standalone gallery cards elsewhere in a
     # document. Limit this read to the profile grid, excluding recommendations.
-    parsed_cards, parsed_raw = extract_eporner_albums_lexbor(selected, grid.html)
+    parsed_cards, parsed_raw = extract_portal_grid_albums_lexbor(selected, grid.html)
     cards, raw, seen = [], [], set()
     aliases = {}
     for url in known_media_urls:
@@ -229,7 +287,7 @@ async def read_recent_albums(root_url, root_html, source, client, known_media_ur
             'order':'source_latest', 'date_kind':'unknown'}
 
 
-async def read_pornhub_media(root_url, root_html, client):
+async def read_portal_tube_media(root_url, root_html, client):
     """Read declared profile collections, without claiming upload chronology.
 
     Public uploads and GIFs from this profile's videos have different source
@@ -238,8 +296,8 @@ async def read_pornhub_media(root_url, root_html, client):
     """
     result = {'albums':[], 'gifs':[], 'raw_albums':[], 'raw_gifs':[], 'pages':{}, 'reported_totals':{}, 'errors':[]}
     for kind, tab_name, collections, selector, parser in (
-        ('albums','photos',('public',),'.photosPage > ul#moreData.photosAlbumsListing',extract_pornhub_albums_lexbor),
-        ('gifs','gifs',('public','video'),'.gifsWrapperProfile > ul#moreData.gifs',extract_pornhub_gifs_lexbor),
+        ('albums','photos',('public',),'.photosPage > ul#moreData.photosAlbumsListing',extract_portal_tube_albums_lexbor),
+        ('gifs','gifs',('public','video'),'.gifsWrapperProfile > ul#moreData.gifs',extract_portal_tube_gifs_lexbor),
     ):
         tab = profile_media_link(root_url,root_html,tab_name)
         if not tab:
@@ -247,7 +305,7 @@ async def read_pornhub_media(root_url, root_html, client):
         seen = set()
         collection_reported_total = 0
         try:
-            tab_url, tab_html = await fetch_recent_html(tab,'pornhub',client)
+            tab_url, tab_html = await fetch_recent_html(tab,'portal_tube',client)
         except (ValueError, httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError,
                 httpcore.TimeoutException, DirectoryFetchError, OSError, TimeoutError):
             result['errors'].append(kind)
@@ -257,9 +315,9 @@ async def read_pornhub_media(root_url, root_html, client):
             if not target:
                 continue
             try:
-                selected, body = await fetch_recent_html(target,'pornhub',client)
+                selected, body = await fetch_recent_html(target,'portal_tube',client)
                 parsed_body = LexborHTMLParser(body)
-                scope = parsed_body.css_first(selector)
+                scope = parsed_body.css_first(selector) or parsed_body.css_first('#profileContent ul#moreData')
                 if scope is None:
                     raise ValueError('Source media collection could not be verified')
                 for counter_node in parsed_body.css('.showingInfo, .showingCounter'):
@@ -311,10 +369,10 @@ def performer_slug(name):
     return re.sub(r'[^\w]+', '-', (name or '').strip().casefold()).strip('-')
 
 
-def eporner_canonical_alias(original, target, expected_name):
+def portal_grid_canonical_alias(original, target, expected_name):
     """Only a source-issued root alias for the same explicitly named performer.
 
-    Eporner has changed opaque suffixes on existing performer URLs. Generic
+    PortalGrid has changed opaque suffixes on existing performer URLs. Generic
     same-host redirects, nested listings and different names remain rejected.
     The returned document must additionally prove its canonical URL/name below.
     """
@@ -337,7 +395,7 @@ async def fetch_recent_html(url, source, client, *, expected_name=None):
         # The root was recognized by an installed adapter; child links were
         # extracted within that profile. Redirects cannot change their origin.
         current = urlsplit(https_url(url))
-        alias = source == 'eporner' and eporner_canonical_alias(original, current, expected_name)
+        alias = source == 'portal_grid' and portal_grid_canonical_alias(original, current, expected_name)
         ctx_path_low = context[1].lower()
         cur_path_low = current.path.rstrip('/').lower()
         same_host = current.netloc.lower().removeprefix('www.') == context[0].lower().removeprefix('www.')
@@ -376,7 +434,7 @@ async def fetch_recent_html(url, source, client, *, expected_name=None):
 _DEFAULT_FETCH_RECENT_HTML = fetch_recent_html
 
 
-async def _fetch_pornhub_watch_html(watch_url, source, client):
+async def _fetch_portal_tube_watch_html(watch_url, source, client):
     if fetch_recent_html is _DEFAULT_FETCH_RECENT_HTML:
         from .profile_directory_transport import _fetch_public_httpx_listing
         from .profile_hub_comment_sources import html_comment_source
@@ -401,7 +459,7 @@ async def _resolve_recent_videos_page(root_url, root_html, source, client):
     resolved = await _fetch_declared_recent_target(root_url, root_html, source, client)
     if resolved is not None:
         return resolved
-    if source == 'pornhub':
+    if source == 'portal_tube':
         videos_tab = profile_media_link(root_url, root_html, 'videos')
         if videos_tab:
             videos_url, videos_html = await fetch_recent_html(videos_tab, source, client)
@@ -414,7 +472,7 @@ async def _resolve_recent_videos_page(root_url, root_html, source, client):
                 resolved = await _fetch_declared_recent_target(public_url, public_html, source, client)
                 if resolved is not None:
                     return resolved
-    elif source == 'eporner':
+    elif source == 'portal_grid':
         uploads_tab = profile_media_link(root_url, root_html, 'uploaded-videos')
         if uploads_tab:
             uploads_url, uploads_html = await fetch_recent_html(uploads_tab, source, client)
@@ -475,8 +533,8 @@ def _recent_fetch_adapter(source: str, client):
 
 
 _PLAYLIST_EXTRACTORS = {
-    'eporner': lambda prof, page, html, av: extract_eporner_playlists_lexbor(prof, page, html, av)[:2],
-    'pornhub': lambda prof, _page, html, av: extract_pornhub_playlists_lexbor(prof, html, av),
+    'portal_grid': lambda prof, page, html, av: extract_portal_grid_playlists_lexbor(prof, page, html, av)[:2],
+    'portal_tube': lambda prof, _page, html, av: extract_portal_tube_playlists_lexbor(prof, html, av),
     'youtube': lambda prof, _page, html, av: extract_youtube_playlists_lexbor(prof, '', html, av)[:2],
 }
 
@@ -513,6 +571,10 @@ async def read_recent_playlists(
 
     section_urls = discover_profile_section_urls(root_url, root_html)
     tab_urls = [u for u in section_urls.get('playlists', []) if not _same_resource_url(u, root_url)]
+    if not tab_urls and source == 'youtube':
+        yt_pl_url = normalize_youtube_channel_base_url(root_url) + '/playlists'
+        if not _same_resource_url(yt_pl_url, root_url):
+            tab_urls = [yt_pl_url]
     if not tab_urls and allow_fallback_tab:
         fallback_sections = discover_profile_section_urls(
             root_url,
@@ -554,7 +616,7 @@ async def read_recent_playlists(
             if fb_batches:
                 complete = fb_complete
 
-    if source == 'eporner' and hasattr(client, 'get'):
+    if source == 'portal_grid' and hasattr(client, 'get'):
         parts = urlsplit(root_url)
         slug_parts = [seg for seg in parts.path.strip('/').split('/') if seg]
         root_host = parts.netloc.lower().removeprefix('www.')
@@ -648,8 +710,459 @@ def _merge_root_identity(result: dict, root_url: str, root_html: str) -> dict:
     return result
 
 
-async def read_recent_profile(url, expected_name=None, known_video_urls=(), known_media_urls=(), *, on_profile=None):
+async def _read_recent_video_portal(
+    safe: str,
+    conn: VideoPortalDescriptor,
+    expected_name: str | None = None,
+    *,
+    page: int = 1,
+    sort: str | None = None,
+    on_profile=None,
+) -> dict:
+    """Fetch bounded recent videos, shorts, albums, playlists, and rich structured portal metadata."""
+    entity_base = normalize_portal_entity_base_url(safe, conn) or safe
+    headers = {**DEFAULT_TRANSPORT_HEADERS, **conn.default_headers(entity_base)}
+    page_num = max(1, int(page))
+    sort_mode = (sort or "best").strip().lower()
+    if sort_mode not in ("best", "new", "latest", "rating", "views", "length"):
+        sort_mode = "best"
+    elif sort_mode == "latest":
+        sort_mode = "new"
+    videos: list[dict] = []
+    shorts: list[dict] = []
+    albums: list[dict] = []
+    playlists: list[dict] = []
+    has_more = False
+    next_page: int | None = None
+    next_page_url: str | None = None
+    total_videos_reported: int | None = None
+
+    async with httpx.AsyncClient(
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=True,
+        headers=headers,
+        transport=PublicHTTPSHttpxTransport(),
+    ) as client:
+        root_resp = await client.get(entity_base)
+        root_resp.raise_for_status()
+        final_url = str(root_resp.url)
+        root_html = root_resp.text or ""
+        root_meta = parse_portal_profile_root(root_html, final_url, conn)
+
+        entity_kind = root_meta.get("entityKind") or detect_portal_entity_kind(entity_base, conn)
+        ajax_base = root_meta.get("ajaxBaseUrl") or entity_base
+        name = root_meta.get("name") or expected_name or conn.display_name
+        avatar_url = root_meta.get("avatarUrl") or ""
+        banner_url = root_meta.get("bannerUrl") or ""
+        bio = root_meta.get("bio") or ""
+        portal_info = dict(root_meta.get("portalInfo") or {})
+        featured_performers = list(root_meta.get("featuredPerformers") or [])
+        affiliated_channels = list(root_meta.get("affiliatedChannels") or [])
+        interests = list(root_meta.get("interests") or [])
+        related_entities = list(root_meta.get("relatedEntities") or [])
+        prof_cfg = conn.profile or {}
+
+        json_loaded = False
+        if entity_kind in ("creator", "channel") and prof_cfg.get("videosJsonPathTemplate"):
+            v_url = build_portal_entity_page_url(ajax_base, conn, sort=sort_mode, page=page_num, section="videos")
+            try:
+                v_resp = await client.get(v_url)
+                if v_resp.status_code == 200:
+                    v_data = v_resp.json()
+                    if isinstance(v_data, dict):
+                        videos = parse_portal_video_json_items(
+                            v_data,
+                            ajax_base,
+                            conn,
+                            creator_name=name,
+                            creator_url=entity_base,
+                            creator_avatar=avatar_url,
+                        )
+                        json_loaded = True
+                        nb_tot = v_data.get(prof_cfg.get("totalVideosKey", "nb_videos"))
+                        nb_per = v_data.get(prof_cfg.get("perPageKey", "nb_per_page")) or len(videos) or 36
+                        if isinstance(nb_tot, (int, float)) and nb_tot >= 0:
+                            total_videos_reported = int(nb_tot)
+                            has_more = (page_num * int(nb_per)) < total_videos_reported
+                        else:
+                            has_more = bool(videos) and len(videos) >= int(nb_per)
+            except Exception:
+                json_loaded = False
+
+        if not json_loaded:
+            if page_num == 1:
+                page_html = root_html
+                page_final_url = final_url
+            else:
+                g_url = build_portal_entity_page_url(entity_base, conn, sort=sort_mode, page=page_num, section="html_grid")
+                g_resp = await client.get(g_url)
+                g_resp.raise_for_status()
+                page_html = g_resp.text or ""
+                page_final_url = str(g_resp.url)
+            videos = parse_portal_video_cards(page_html, page_final_url, conn)
+            max_page = extract_portal_max_page(page_html, conn)
+            has_more = page_num < max_page
+
+        if has_more:
+            next_page = page_num + 1
+            next_page_url = build_portal_entity_page_url(entity_base, conn, sort=sort_mode, page=next_page, section="html_grid")
+
+        if page_num == 1 and entity_kind in ("creator", "channel"):
+            if prof_cfg.get("shortsJsonPathTemplate") and portal_info.get("hasShorts", True):
+                try:
+                    sr = await client.get(build_portal_entity_page_url(ajax_base, conn, sort="best", page=1, section="shorts"))
+                    if sr.status_code == 200 and sr.text.lstrip().startswith("{"):
+                        shorts = parse_portal_video_json_items(sr.json(), ajax_base, conn, creator_name=name, creator_url=entity_base, creator_avatar=avatar_url)
+                except Exception:
+                    pass
+            ap = str(prof_cfg.get("albumsPath") or "").strip()
+            if ap:
+                try:
+                    ar = await client.get(ajax_base.rstrip("/") + ap)
+                    if ar.status_code == 200:
+                        albums = parse_portal_albums(ar.text, str(ar.url), conn)
+                        for a in albums:
+                            a.setdefault("url", a.get("originalUrl"))
+                except Exception:
+                    pass
+            pp = str(prof_cfg.get("playlistsPath") or "").strip()
+            if pp:
+                try:
+                    pr = await client.get(ajax_base.rstrip("/") + pp)
+                    if pr.status_code == 200:
+                        playlists = parse_portal_playlists(pr.text, str(pr.url), conn, fallback_avatar=avatar_url)
+                        for pl in playlists:
+                            pl.setdefault("url", pl.get("originalUrl"))
+                except Exception:
+                    pass
+
+    if not avatar_url and videos:
+        avatar_url = videos[0].get("thumbnailUrl") or ""
+
+    handle = "@" + re.sub(r"[^a-zA-Z0-9_.-]+", "", urlsplit(entity_base).path.strip("/").split("/")[-1] or name.lower())
+    reported_videos = max(
+        int(total_videos_reported or 0),
+        int(portal_info.get("totalFreeVideos") or 0),
+        int(root_meta.get("topicTotalResults") or 0),
+        len(videos),
+    )
+    stats: dict[str, Any] = {
+        "videos": reported_videos,
+        "albums": len(albums),
+        "playlists": len(playlists),
+    }
+    if shorts or portal_info.get("totalShorts"):
+        stats["shorts"] = max(int(portal_info.get("totalShorts") or 0), len(shorts))
+        stats["gifs"] = stats["shorts"]
+    if root_meta.get("subscribersCount") is not None:
+        stats["subscribers"] = root_meta["subscribersCount"]
+    if root_meta.get("totalViewsCount") is not None:
+        stats["views"] = root_meta["totalViewsCount"]
+    if portal_info.get("ratingPercent"):
+        stats["rating"] = portal_info["ratingPercent"]
+
+    profile_data = {
+        "name": name,
+        "handle": handle,
+        "url": entity_base,
+        "profileUrl": entity_base,
+        "site": conn.id,
+        "source": conn.id,
+        "entityKind": entity_kind,
+        "verified": bool(root_meta.get("verified", False)),
+        "avatarUrl": avatar_url,
+        "bannerUrl": banner_url,
+        "coverUrl": banner_url or avatar_url or (videos[0].get("thumbnailUrl") if videos else ""),
+        "bio": bio,
+        "bio_details": {"bio": bio, **portal_info} if (bio or portal_info) else {},
+        "portalInfo": portal_info,
+        "featuredPerformers": featured_performers,
+        "affiliatedChannels": affiliated_channels,
+        "interests": interests,
+        "relatedEntities": related_entities,
+        "stats": stats,
+        "supportsSort": ["best", "latest"] if entity_kind in ("creator", "channel") else [],
+        "activeSort": sort_mode if entity_kind in ("creator", "channel") else "default",
+    }
+    res_obj = {
+        "success": True,
+        "source": conn.id,
+        "source_url": entity_base,
+        "entityKind": entity_kind,
+        "portalInfo": portal_info,
+        "featuredPerformers": featured_performers,
+        "affiliatedChannels": affiliated_channels,
+        "interests": interests,
+        "relatedEntities": related_entities,
+        "page": page_num,
+        "hasMore": has_more,
+        "nextPage": next_page,
+        "nextPageUrl": next_page_url,
+        "profile_key": f"{conn.id}:{urlsplit(entity_base).path.strip('/')}",
+        "name": name,
+        "description": bio,
+        "profile_data": profile_data,
+        "supportsSort": profile_data["supportsSort"],
+        "activeSort": profile_data["activeSort"],
+        "canonical_videos": videos,
+        "videos": {"status": "complete", "items": videos, "loaded_count": len(videos)},
+        "canonical_shorts": shorts,
+        "shorts": {"status": "complete", "items": shorts, "loaded_count": len(shorts)},
+        "canonical_albums": albums,
+        "albums": {"status": "complete", "items": albums, "loaded_count": len(albums)},
+        "canonical_gifs": shorts,
+        "gifs": {"status": "complete", "items": shorts, "loaded_count": len(shorts)},
+        "canonical_playlists": playlists,
+        "playlists": {"status": "complete", "items": playlists, "loaded_count": len(playlists)},
+        "recent_capabilities": {"videos": "source_listing", "playlists": "source_listing", "albums": "source_listing"},
+        "source_checked_at": datetime.now(timezone.utc).isoformat(),
+        "discovery_errors": [],
+        "partial_reason": None,
+        "discovery_pending": False,
+    }
+    if on_profile is not None:
+        await on_profile(dict(res_obj))
+    return res_obj
+
+
+async def _read_recent_visual_profile(
+    safe: str,
+    conn: CatalogDescriptor | ForumDescriptor | VideoPortalDescriptor,
+    expected_name: str | None = None,
+    *,
+    page: int = 1,
+    sort: str | None = None,
+    on_profile=None,
+) -> dict:
+    """Fetch bounded recent galleries/threads/videos for configured connectors."""
+    if isinstance(conn, VideoPortalDescriptor):
+        return await _read_recent_video_portal(
+            safe,
+            conn,
+            expected_name=expected_name,
+            page=page,
+            sort=sort,
+            on_profile=on_profile,
+        )
+    source = conn.id
+    entity_kind = _detect_visual_entity_kind(safe, conn)
+    albums: list[dict] = []
+    gifs: list[dict] = []
+    related_entities: list[dict] = []
+    seen_urls: set[str] = set()
+    discovery_errors: list[str] = []
+    partial_reason: str | None = None
+    avatar_url = ''
+    name = expected_name or ''
+    bio = ''
+    has_more = False
+    next_page: int | None = None
+    next_page_url: str | None = None
+
+    def _add_album(entry: dict) -> None:
+        u = entry.get('url') or ''
+        if not u or u in seen_urls:
+            return
+        seen_urls.add(u)
+        if entry.get('mediaType') == 'gif' or entry.get('type') == 'gif':
+            gifs.append(entry)
+        else:
+            albums.append(entry)
+
+    async with httpx.AsyncClient(
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=True,
+        headers=DEFAULT_TRANSPORT_HEADERS,
+        transport=PublicHTTPSHttpxTransport(),
+    ) as client:
+        if isinstance(conn, CatalogDescriptor):
+            cat_prof = await read_catalog_entity_profile(
+                client,
+                conn,
+                safe,
+                page=max(1, page),
+                name_hint=name,
+            )
+            name = cat_prof.get('name') or name or conn.display_name
+            avatar_url = cat_prof.get('avatarUrl') or ''
+            entity_kind = cat_prof.get('entityKind') or entity_kind
+            related_entities = cat_prof.get('relatedEntities') or []
+            has_more = bool(cat_prof.get('hasMore'))
+            next_page = cat_prof.get('nextPage')
+            next_page_url = cat_prof.get('nextPageUrl')
+            safe = cat_prof.get('source_url') or safe
+            for a in cat_prof.get('albums') or []:
+                _add_album(a)
+            for g in cat_prof.get('gifs') or []:
+                _add_album(g)
+        else:
+            target_url = safe
+            if entity_kind == 'thread' and page > 1 and not re.search(r'/page\d+$', urlsplit(safe).path, re.I):
+                base_path = re.sub(r'/page\d+$', '', urlsplit(safe).path.rstrip('/'))
+                p_sp = urlsplit(safe)
+                target_url = urlunsplit((p_sp.scheme, p_sp.netloc, f"{base_path}/page{page}", '', ''))
+            resp = await client.get(target_url)
+            resp.raise_for_status()
+            final_url = str(resp.url)
+            html = resp.text or ''
+            tree = LexborHTMLParser(html)
+
+            if not name:
+                h1 = tree.css_first('h1, span.threadtitle, .forumhead h1, title')
+                if h1 is not None:
+                    name = h1.text(separator=' ', strip=True)
+            if not name:
+                slug = urlsplit(final_url).path.strip('/').split('/')[-1]
+                name = re.sub(r'[-_]+', ' ', slug).strip().title() or conn.display_name
+
+            av_node = tree.css_first('.avatarcontainer img, .userinfo img, img.avatar')
+            if av_node is not None:
+                avatar_url = _abs_board_url(final_url, av_node.attributes.get('src') or av_node.attributes.get('data-src') or '') or ''
+
+            if entity_kind == 'thread':
+                parsed = parse_forum_thread_page(html, final_url, conn)
+                total_pages = int(parsed.get('totalPages') or 1)
+                target_thread_url = final_url
+                if page == 1 and total_pages > 1 and int(parsed.get('currentPage') or 1) < total_pages:
+                    p_split = urlsplit(final_url)
+                    base_path = re.sub(r'/page\d+$', '', p_split.path.rstrip('/'))
+                    latest_url = urlunsplit((p_split.scheme, p_split.netloc, f"{base_path}/page{total_pages}", '', ''))
+                    try:
+                        latest_resp = await client.get(latest_url)
+                        if latest_resp.status_code == 200 and latest_resp.text:
+                            latest_parsed = parse_forum_thread_page(latest_resp.text, str(latest_resp.url), conn)
+                            if latest_parsed.get('photos'):
+                                parsed = latest_parsed
+                                target_thread_url = str(latest_resp.url)
+                    except Exception:
+                        pass
+                photos = parsed.get('photos') or []
+                previews = [p.get('thumbnailUrl') or p.get('originalUrl') for p in photos[:4] if p.get('thumbnailUrl') or p.get('originalUrl')]
+                _add_album({
+                    'url': target_thread_url,
+                    'title': name,
+                    'thumbnailUrl': previews[0] if previews else avatar_url,
+                    'previewImages': previews,
+                    'photoCount': len(photos),
+                    'totalPages': parsed.get('totalPages', total_pages),
+                    'threadKind': parsed.get('threadKind'),
+                    'releaseSpecs': parsed.get('releaseSpecs') or [],
+                    'type': 'album',
+                    'mediaType': 'video_release' if parsed.get('threadKind') == 'video_release' else 'album',
+                    'sourceSite': source,
+                    'authorName': parsed.get('author') or name,
+                    'authorUrl': final_url,
+                })
+            elif entity_kind == 'subforum':
+                if page > 1 and '/page' not in urlsplit(final_url).path.lower():
+                    p_sp = urlsplit(final_url)
+                    paged_forum_url = urlunsplit((p_sp.scheme, p_sp.netloc, f"{p_sp.path.rstrip('/')}/page{page}", '', ''))
+                    pg_resp = await client.get(paged_forum_url)
+                    if pg_resp.status_code == 200 and pg_resp.text:
+                        html = pg_resp.text
+                        final_url = str(pg_resp.url)
+                threads, next_board_url, _ = parse_board_threads(html, conn, current_page=page)
+                for th in threads:
+                    _add_album({
+                        'url': th['albumUrl'],
+                        'title': th['title'],
+                        'thumbnailUrl': th.get('thumbnail') or '',
+                        'type': th.get('type') or 'album',
+                        'mediaType': th.get('mediaType') or 'album',
+                        'threadKind': th.get('threadKind'),
+                        'releaseSpecs': th.get('releaseSpecs') or [],
+                        'sourceSite': source,
+                        'authorName': th.get('creatorName') or name,
+                        'authorUrl': th.get('sourcePage') or final_url,
+                    })
+                has_more = bool(next_board_url and albums)
+                next_page = (page + 1) if has_more else None
+                next_page_url = next_board_url if has_more else None
+            else:
+                m_uid = re.search(r'/members/(\d+)', urlsplit(final_url).path)
+                if m_uid:
+                    board_origin = f"{urlsplit(final_url).scheme}://{urlsplit(final_url).netloc}"
+                    try:
+                        search_u = f"{board_origin}/search.php?do=finduser&userid={m_uid.group(1)}&contenttype=vBForum_Thread"
+                        s_resp = await client.get(search_u)
+                        s_text = s_resp.text or ''
+                        if any(tok in s_text.lower() for tok in ('log in', 'must login', 'permission', 'not logged in')):
+                            partial_reason = 'guest_profile_restricted'
+                        else:
+                            threads, _, _ = parse_board_threads(s_text, conn)
+                            for th in threads:
+                                _add_album({
+                                    'url': th['albumUrl'],
+                                    'title': th['title'],
+                                    'thumbnailUrl': '',
+                                    'type': 'album',
+                                    'mediaType': th.get('mediaType') or 'album',
+                                    'threadKind': th.get('threadKind'),
+                                    'sourceSite': source,
+                                    'authorName': name,
+                                    'authorUrl': final_url,
+                                })
+                    except Exception:
+                        partial_reason = 'guest_profile_restricted'
+
+    if not avatar_url and albums:
+        avatar_url = albums[0].get('thumbnailUrl') or ''
+
+    handle = '@' + re.sub(r'[^a-zA-Z0-9_.-]+', '', urlsplit(safe).path.strip('/').split('/')[-1] or name.lower())
+    profile_data = {
+        'name': name,
+        'handle': handle,
+        'url': safe,
+        'profileUrl': safe,
+        'site': source,
+        'entityKind': entity_kind,
+        'avatarUrl': avatar_url,
+        'bio': bio,
+        'relatedEntities': related_entities,
+        'stats': {
+            'albums': len(albums),
+            'gifs': len(gifs),
+            'videos': 0,
+            'playlists': 0,
+        },
+    }
+    res_obj = {
+        'success': True,
+        'source': source,
+        'source_url': safe,
+        'entityKind': entity_kind,
+        'relatedEntities': related_entities,
+        'page': page,
+        'hasMore': has_more,
+        'nextPage': next_page,
+        'nextPageUrl': next_page_url,
+        'profile_key': f'{source}:{urlsplit(safe).path.strip("/")}',
+        'name': name,
+        'profile_data': profile_data,
+        'canonical_videos': [],
+        'videos': {'status': 'complete', 'items': [], 'loaded_count': 0},
+        'canonical_albums': albums,
+        'albums': {'status': 'complete', 'items': albums, 'loaded_count': len(albums)},
+        'canonical_gifs': gifs,
+        'gifs': {'status': 'complete', 'items': gifs, 'loaded_count': len(gifs)},
+        'canonical_playlists': [],
+        'playlists': {'status': 'complete', 'items': [], 'loaded_count': 0},
+        'recent_capabilities': {'albums': 'source_listing', 'photos': 'source_listing', 'gifs': 'source_listing'},
+        'source_checked_at': datetime.now(timezone.utc).isoformat(),
+        'discovery_errors': discovery_errors,
+        'partial_reason': partial_reason,
+        'discovery_pending': False,
+    }
+    if on_profile is not None:
+        await on_profile(dict(res_obj))
+    return res_obj
+
+
+async def read_recent_profile(url, expected_name=None, known_video_urls=(), known_media_urls=(), *, page: int = 1, sort: str | None = None, on_profile=None):
     safe = https_url(url.strip())
+    conn = find_connector_for_url(safe)
+    if conn is not None:
+        return await _read_recent_visual_profile(safe, conn, expected_name=expected_name, page=page, sort=sort, on_profile=on_profile)
     source = recent_source(safe)
     async with httpx.AsyncClient(transport=PublicHTTPSHttpxTransport(), timeout=REQUEST_TIMEOUT,
                                 follow_redirects=False, headers=DEFAULT_TRANSPORT_HEADERS) as client:
@@ -664,7 +1177,8 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
         if source != 'youtube' and not _same_resource_url(target, root_url):
             _merge_root_identity(result, root_url, root_html)
         early_playlists_res = None
-        if source == 'eporner':
+        early_yt_albums = None
+        if source in ('portal_grid', 'youtube'):
             fallback_avatar_early = ''
             if isinstance(result.get('profile_data'), dict):
                 fallback_avatar_early = result['profile_data'].get('avatarUrl') or ''
@@ -682,10 +1196,42 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
             except (ValueError, httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError,
                     httpcore.TimeoutException, DirectoryFetchError, OSError, TimeoutError):
                 early_playlists_res = None
+            if source == 'youtube' and type(client) is httpx.AsyncClient:
+                base_yt = normalize_youtube_channel_base_url(root_url)
+                existing_yt_urls = {v.get('originalUrl') for v in result.get('canonical_videos', []) if v.get('originalUrl')}
+                try:
+                    shorts_url = f"{base_yt}/shorts"
+                    _, shorts_html = await fetch_recent_html(shorts_url, source, client)
+                    s_can, s_raw = extract_youtube_videos_lexbor(shorts_url, shorts_html)
+                    for idx, sc in enumerate(s_can):
+                        u = sc.get('originalUrl')
+                        if not u or u in existing_yt_urls:
+                            continue
+                        existing_yt_urls.add(u)
+                        result.setdefault('canonical_videos', []).append(sc)
+                        if isinstance(result.get('videos'), dict) and isinstance(result['videos'].get('items'), list):
+                            if idx < len(s_raw):
+                                result['videos']['items'].append(s_raw[idx])
+                            result['videos']['loaded_count'] = len(result['canonical_videos'])
+                except (ValueError, httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError,
+                        httpcore.TimeoutException, DirectoryFetchError, OSError, TimeoutError):
+                    pass
+                try:
+                    posts_url = f"{base_yt}/posts"
+                    _, posts_html = await fetch_recent_html(posts_url, source, client)
+                    a_can, a_raw = extract_youtube_albums_lexbor(posts_url, posts_html, fallback_avatar=fallback_avatar_early)
+                    if a_can:
+                        early_yt_albums = (a_can, a_raw)
+                except (ValueError, httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError,
+                        httpcore.TimeoutException, DirectoryFetchError, OSError, TimeoutError):
+                    pass
         is_streaming = on_profile is not None
         if is_streaming:
             snap = dict(result)
             snap['canonical_videos'] = list(result.get('canonical_videos', []))
+            if early_yt_albums is not None:
+                snap['canonical_albums'] = list(early_yt_albums[0])
+                snap['albums'] = {'status': 'partial', 'items': list(early_yt_albums[1]), 'loaded_count': len(early_yt_albums[0])}
             if early_playlists_res is not None:
                 snap['canonical_playlists'] = list(early_playlists_res['items'])
                 snap['playlists'] = {
@@ -696,7 +1242,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
             snap['discovery_pending'] = True
             await on_profile(snap)
 
-        if source == 'eporner' and hasattr(client, 'post'):
+        if is_streaming and source == 'portal_grid' and hasattr(client, 'post'):
             existing_v_urls = {v.get('originalUrl') for v in result.get('canonical_videos', []) if v.get('originalUrl')}
 
             async def _emit_recent_progress():
@@ -737,7 +1283,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                 client,
                 target,
                 html,
-                extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                 item_key_fn=lambda item: item.get('originalUrl') or '',
                 initial_seen_keys=existing_v_urls,
                 stop_on_keys=(),
@@ -749,7 +1295,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                 client,
                 target,
                 html,
-                extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                 item_key_fn=lambda item: item.get('originalUrl') or '',
                 initial_seen_keys=existing_v_urls,
                 stop_on_keys=(),
@@ -775,7 +1321,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                         await collect_paginated_section(
                             client,
                             hyphen_video_tabs,
-                            extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                            extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                             item_key_fn=lambda item: item.get('originalUrl') or '',
                             max_pages=None,
                             concurrency=2,
@@ -787,7 +1333,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                         vtab_batches, _ = await collect_paginated_section(
                             client,
                             hyphen_video_tabs,
-                            extract_fn=lambda p_url, p_html: extract_eporner_videos_lexbor(p_url, p_html),
+                            extract_fn=lambda p_url, p_html: extract_portal_grid_videos_lexbor(p_url, p_html),
                             item_key_fn=lambda item: item.get('originalUrl') or '',
                             max_pages=15,
                             concurrency=6,
@@ -799,7 +1345,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                 pd_stats = result['profile_data'].setdefault('stats', {})
                 pd_stats['videos'] = max(pd_stats.get('videos') or 0, len(result['canonical_videos']))
 
-        elif is_streaming and source in ('youtube', 'xhamster', 'pornhub'):
+        elif is_streaming and source in ('youtube', 'portal_state', 'portal_tube'):
             existing_v_urls = {v.get('originalUrl') for v in result.get('canonical_videos', []) if v.get('originalUrl')}
 
             async def _emit_other_progress():
@@ -842,9 +1388,9 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                     delay_seconds=0.45,
                     on_batch=_append_other_videos,
                 )
-            elif source == 'xhamster' and hasattr(client, 'get'):
-                base_xh = normalize_xhamster_profile_base_url(root_url)
-                max_xh_page = extract_xhamster_max_video_page(
+            elif source == 'portal_state' and hasattr(client, 'get'):
+                base_xh = normalize_portal_state_profile_base_url(root_url)
+                max_xh_page = extract_portal_state_max_video_page(
                     html, total_videos=result.get('profile_data', {}).get('stats', {}).get('videos')
                 )
                 root_host = urlsplit(root_url).netloc.lower().removeprefix('www.')
@@ -858,17 +1404,17 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                             resp = await client.get(p_url, follow_redirects=True)
                         if resp.status_code != 200 or urlsplit(str(resp.url)).netloc.lower().removeprefix('www.') != root_host:
                             break
-                        b_can, b_raw = extract_xhamster_videos_lexbor(root_url, resp.text)
+                        b_can, b_raw = extract_portal_state_videos_lexbor(root_url, resp.text)
                         if not b_can or not await _append_other_videos(b_can, b_raw):
                             break
                     except Exception:
                         break
                     p_num += 1
                     await asyncio.sleep(0.45)
-            elif source == 'pornhub' and hasattr(client, 'get'):
-                base_ph = normalize_pornhub_profile_base_url(root_url)
+            elif source == 'portal_tube' and hasattr(client, 'get'):
+                base_ph = normalize_portal_tube_profile_base_url(root_url)
                 videos_base = f"{base_ph}/videos"
-                max_ph_page = extract_pornhub_max_video_page(html)
+                max_ph_page = extract_portal_tube_max_video_page(html)
                 root_host = urlsplit(root_url).netloc.lower().removeprefix('www.')
                 p_num = 2
                 while max_ph_page >= 2 and p_num <= max_ph_page:
@@ -880,7 +1426,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                             resp = await client.get(p_url, follow_redirects=True)
                         if resp.status_code != 200 or "leastFactor" in resp.text or urlsplit(str(resp.url)).netloc.lower().removeprefix('www.') != root_host:
                             break
-                        b_can, b_raw = extract_pornhub_videos_lexbor(root_url, resp.text)
+                        b_can, b_raw = extract_portal_tube_videos_lexbor(root_url, resp.text)
                         if not b_can or not await _append_other_videos(b_can, b_raw):
                             break
                     except Exception:
@@ -894,7 +1440,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
         result['albums'] = {'status':'partial', 'items':[], 'loaded_count':0}
         result['recent_capabilities'] = {'videos':'source_latest', 'photos':'unverified', 'albums':'unverified', 'gifs':'unverified'}
         errors = []
-        if source == 'eporner':
+        if source == 'portal_grid':
             await enrich_publication_dates(result, client, known_video_urls)
             try:
                 albums = await read_recent_albums(root_url, root_html, source, client, known_media_urls)
@@ -914,9 +1460,9 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                     stats = result['profile_data'].setdefault('stats', {})
                     if not stats.get('albums'):
                         stats['albums'] = None
-        elif source == 'pornhub':
-            await enrich_pornhub_publication_dates(result, client, _fetch_pornhub_watch_html, known_video_urls)
-            media = await read_pornhub_media(root_url,root_html,client)
+        elif source == 'portal_tube':
+            await enrich_portal_tube_publication_dates(result, client, _fetch_portal_tube_watch_html, known_video_urls)
+            media = await read_portal_tube_media(root_url,root_html,client)
             errors.extend(media['errors'])
             reported_totals = media.get('reported_totals') or {}
             stats = result['profile_data'].setdefault('stats', {}) if isinstance(result.get('profile_data'), dict) else None
@@ -938,6 +1484,14 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
                             stats['albums'] = None
                     elif rep is not None or media[kind] or stats.get('gifs') is not None:
                         stats['gifs'] = max(stats.get('gifs') or 0, rep or 0, len(media[kind]))
+        elif source == 'youtube' and early_yt_albums is not None:
+            a_can, a_raw = early_yt_albums
+            result['canonical_albums'] = a_can
+            result['albums'] = {'status': 'partial', 'items': a_raw, 'loaded_count': len(a_can)}
+            result['recent_capabilities'].update(photos='source_latest', albums='source_latest')
+            if isinstance(result.get('profile_data'), dict):
+                stats = result['profile_data'].setdefault('stats', {})
+                stats['albums'] = max(stats.get('albums') or 0, len(a_can))
     fallback_avatar = ''
     if isinstance(result.get('profile_data'), dict):
         fallback_avatar = result['profile_data'].get('avatarUrl') or ''
@@ -991,7 +1545,13 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
         # read does not resolve actual available streams/quality.
         video.pop('resolution', None)
     result['source_checked_at'] = datetime.now(timezone.utc).isoformat()
-    video_dates_incomplete = source == 'eporner' and result.get('publication_dates',{}).get('status') == 'partial'
+    pub_dates = result.get('publication_dates') or {}
+    video_dates_incomplete = (
+        pub_dates.get('source') == 'official_api'
+        and pub_dates.get('status') == 'partial'
+        and (pub_dates.get('observed_count') or 0) == 0
+        and (pub_dates.get('skipped_client_known') or 0) == 0
+    )
     result['discovery_errors'] = errors+(['videos'] if video_dates_incomplete else [])
     result['discovery_pending'] = False
     return result
@@ -1000,7 +1560,7 @@ async def read_recent_profile(url, expected_name=None, known_video_urls=(), know
 @router.post('/recent')
 async def recent_profile(request: RecentProfileRequest):
     try:
-        return await read_recent_profile(request.url, request.expected_name, request.known_video_urls, request.known_media_urls)
+        return await read_recent_profile(request.url, request.expected_name, request.known_video_urls, request.known_media_urls, page=request.page, sort=request.sort)
     except ValueError as error:
         raise HTTPException(422, detail=str(error)) from error
     except (httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError, httpcore.TimeoutException,
@@ -1026,6 +1586,8 @@ async def recent_profile_stream(request: RecentProfileRequest):
                     request.expected_name,
                     request.known_video_urls,
                     request.known_media_urls,
+                    page=request.page,
+                    sort=request.sort,
                     on_profile=emit,
                 )
                 await queue.put({'type': 'complete', 'profile': profile})

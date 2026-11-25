@@ -1,7 +1,7 @@
 /**
  * UniversalVideoPlayer.tsx
  *
- * IMAGEX.AI Universal Video Player & Adaptive Container-Query UI Shell.
+ * IMAGEX Universal Video Player & Adaptive Container-Query UI Shell.
  * Single unified player engine & container-query shell supporting card, cinema,
  * compact, and mini density modes across desktop and mobile.
  *

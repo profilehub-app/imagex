@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { version as appVersion } from '../../../package.json';
 import {
   Sparkles,
   Download,
@@ -98,8 +99,8 @@ export const UpdateModal: React.FC = () => {
 
   if (!updateModalOpen && !isApplyingUpdate) return null;
 
-  const currentVersion = updateInfo?.current_version || '5.7.0';
-  const latestVersion = updateInfo?.latest_version || '5.7.0';
+  const currentVersion = updateInfo?.current_version || appVersion;
+  const latestVersion = updateInfo?.latest_version || appVersion;
   const releaseName = updateInfo?.release_name || `IMAGEX ${latestVersion}`;
   const releaseNotes = updateInfo?.release_notes || '';
   const publishedDate = updateInfo?.published_at

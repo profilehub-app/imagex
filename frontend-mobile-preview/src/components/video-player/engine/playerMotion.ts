@@ -1,7 +1,7 @@
 /**
  * playerMotion.ts
  *
- * Motion Engine & Web Platform Transition Manager for IMAGEX.AI Universal Video Player.
+ * Motion Engine & Web Platform Transition Manager for IMAGEX Universal Video Player.
  * - Discrete display exit transitions avoiding Firefox Bug 1882408 via [data-closing="true"]
  *   and settled animation promises + 2000ms failsafe timeout
  * - Safe document.startViewTransition wrapper assigning & clearing transient view-transition-name

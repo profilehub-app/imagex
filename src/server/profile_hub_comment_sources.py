@@ -5,19 +5,50 @@ Replies require an actual nested comment block; adjacency/usernames are not link
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import html as _html
 import re
 from urllib.parse import urljoin,urlsplit,urlunsplit,parse_qsl,urlencode
 
 from selectolax.lexbor import LexborHTMLParser
-from yt_dlp.extractor.eporner import EpornerIE
-from yt_dlp.extractor.pornhub import PornHubIE
-from yt_dlp.extractor.xhamster import XHamsterIE
 
 from .profile_hub_execution import https_url
 from .profile_hub_engagement import unique_source_count,exact_source_count,exact_source_score
+from .profile_hub_providers import match_ytdlp_video_id
 
 
 COMMENT_REACTION_KINDS=('like_dislike','like','heart','score')
+_BR_TAG_RE=re.compile(r'<br\s*/?>',re.I)
+
+
+def sanitize_comment_text(value: str | None, *, preserve_newlines: bool = True) -> str:
+    """Decode HTML entities (&nbsp;, &#039;, &amp;, etc.) and normalize spacing safely."""
+    if not isinstance(value, str) or not value:
+        return ''
+    text = _BR_TAG_RE.sub('\n' if preserve_newlines else ' ', value)
+    # Unescape up to twice to handle double-encoded JSON entities (&amp;nbsp;, &amp;#039;).
+    for _ in range(2):
+        unescaped = _html.unescape(text)
+        if unescaped == text:
+            break
+        text = unescaped
+    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\xa0', ' ').replace('\u200b', '')
+    if not preserve_newlines:
+        return re.sub(r'\s+', ' ', text).strip()
+    lines = [re.sub(r'[ \t]{2,}', ' ', line).strip() for line in text.split('\n')]
+    return re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
+
+
+def _format_unix_comment_time(raw) -> str:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return ''
+    if raw <= 0:
+        return ''
+    try:
+        dt = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        return dt.strftime('%Y-%m-%d')
+    except (OverflowError, OSError, ValueError):
+        return ''
 
 
 def source_comment_reactions(record):
@@ -65,16 +96,21 @@ class HTMLCommentsSource:
 
     @classmethod
     def match_watch_identity(cls,safe):
-        if not cls.extractor.suitable(safe):return None
-        match=cls.extractor._match_valid_url(safe)
-        if match is None:return None
-        # Extractor regexes intentionally accept URL prefixes. A partial ID (e.g.
-        # uppercase suffix outside a source alphabet) is not the same video.
-        tail=safe[match.end('id'):]
-        if tail and tail[0] not in '/?&#':return None
-        return cls.extractor._match_id(safe)
+        return match_ytdlp_video_id(safe)
 
     def watch_fetch_url(self):return self.source_url
+
+    def supported_comment_sorts(self, html) -> tuple[str, ...]:
+        """Return supported comment sort modes in default-first order (e.g. ('popular', 'newest'))."""
+        return ()
+
+    def comment_sort_page_url(self, html, sort: str | None) -> str | None:
+        """Return a remote fragment URL for a non-default comment sort, or None if already in watch HTML."""
+        return None
+
+    def extract_profile_audience(self, html, final_url, adapter):
+        """Optional source-specific profile audience extractor; returns (label, kind)."""
+        return None, None
 
     def next_comment_page(self,html):return None
 
@@ -247,9 +283,8 @@ class HTMLCommentsSource:
         return records
 
 
-class EpornerCommentsSource(HTMLCommentsSource):
-    id='eporner'
-    extractor=EpornerIE
+class PortalGridCommentsSource(HTMLCommentsSource):
+    id='portal_grid'
     block_class='commbox'
     block_selector='#commentdivleft .commbox'
     message_selector='p[id^="ct"]'
@@ -257,13 +292,19 @@ class EpornerCommentsSource(HTMLCommentsSource):
     avatar_selector='.commboxprofile img'
     time_selector='.commboxtime small, .commboxtime span'
     time_selectors=('.commboxtime small','.commboxtime > time','.commboxtime span')
-    # Eporner's displayed vote is a net score, not a count of likes.
+    # Displayed vote is a net score, not a count of likes.
     vote_selector=None
     reaction_kind='score'
     score_selector='.commboxvote'
     dislike_selector=None
     likes_selector='#likeclick .likeup i, #likeclick .likeup small'
     comment_count_selector='#uvmnew .uvmspn1 small'
+
+    @classmethod
+    def match_watch_identity(cls, safe):
+        parts = urlsplit(safe)
+        m = re.match(r'^/(?:video-|hd-video/)([A-Za-z0-9]+)', parts.path)
+        return m.group(1) if m else None
 
     def engagement(self,html):
         counts=super().engagement(html)
@@ -287,20 +328,23 @@ class EpornerCommentsSource(HTMLCommentsSource):
         identity=block.attributes.get('id','')
         return f'{self.id}:{identity}' if re.fullmatch(r'c[0-9]+',identity) else None
 
+    def extract_profile_audience(self, html, final_url, adapter):
+        from .profile_hub_watch_sources import portal_grid_profile_audience, format_audience_label
+        raw = portal_grid_profile_audience(html, final_url, adapter)
+        return format_audience_label(raw, 'subscribers')
 
-class PornhubCommentsSource(HTMLCommentsSource):
-    id='pornhub'
-    extractor=PornHubIE
+
+class PortalTubeCommentsSource(HTMLCommentsSource):
+    id='portal_tube'
     _SHORTIES_PATH=re.compile(r'/shorties/([0-9a-z]+)/?\Z')
     block_class='commentBlock'
 
     @classmethod
     def match_watch_identity(cls,safe):
-        identity=super().match_watch_identity(safe)
-        if identity is not None:return identity
         parts=urlsplit(safe)
-        host=(parts.hostname or '').lower()
-        if not re.search(r'(?:^|\.)pornhub(?:premium)?\.(?:com|net|org)$',host):return None
+        pairs=dict(parse_qsl(parts.query))
+        if parts.path == '/view_video.php' and pairs.get('viewkey'):
+            return pairs['viewkey']
         match=cls._SHORTIES_PATH.fullmatch(parts.path)
         return match[1] if match else None
 
@@ -388,25 +432,48 @@ class PornhubCommentsSource(HTMLCommentsSource):
         count=len(tree.css('.commentBlock'))
         return self.parse(scoped,self.source_url,count,include_unavailable=True) if count else []
 
+    def supported_comment_sorts(self, html) -> tuple[str, ...]:
+        tree = LexborHTMLParser(html)
+        if tree.css_first('#cmtWrapper .js-cmtFilter[data-sort], #cmtWrapper [data-sort*="/comment/show"]') is not None:
+            return ('popular', 'newest')
+        return ()
 
-class XHamsterCommentsSource(HTMLCommentsSource):
+    def comment_sort_page_url(self, html, sort: str | None) -> str | None:
+        if sort != 'newest':
+            return None
+        tree = LexborHTMLParser(html)
+        node = tree.css_first('#cmtWrapper .js-cmtFilter[data-sort], #cmtWrapper [data-sort*="/comment/show"]')
+        if node is None:
+            return None
+        raw = node.attributes.get('data-sort') or ''
+        if not raw:
+            return None
+        target = https_url(urljoin(self.source_url, raw))
+        parts = urlsplit(target)
+        pairs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != 'popular'] + [('popular', '0')]
+        url_out = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(pairs), ''))
+        self.comment_page_identity(url_out)
+        return url_out
+
+
+class PortalStateCommentsSource(HTMLCommentsSource):
     """Source-owned video comments embedded in the page state."""
-    id='xhamster'
-    extractor=XHamsterIE
+    id='portal_state'
     block_selector='[data-comment-id]'
     block_class='comment'
 
     @classmethod
     def match_watch_identity(cls,url):
-        match=cls.extractor._match_valid_url(url)
-        if match is None:return None
-        group='id' if match.group('id') is not None else 'id_2'
-        tail=url[match.end(group):]
-        return match.group(group) if not tail or tail[0] in '/?&#' else None
+        parts = urlsplit(url)
+        m = re.match(r'^/videos/[^/]+-([A-Za-z0-9]+)/?$', parts.path)
+        if m:
+            return m.group(1)
+        m2 = re.match(r'^/movies/([A-Za-z0-9]+)/', parts.path)
+        return m2.group(1) if m2 else None
 
     def engagement(self,html):
-        from .profile_hub_workers import _extract_xhamster_initials
-        video=_extract_xhamster_initials(html).get('videoModel')
+        from .profile_hub_workers import _extract_window_initials
+        video=_extract_window_initials(html).get('videoModel')
         video=video if isinstance(video,dict) else {}
         rating=video.get('rating') if isinstance(video.get('rating'),dict) else {}
         return {'like_count':exact_source_count(rating.get('likes')),
@@ -432,9 +499,9 @@ class XHamsterCommentsSource(HTMLCommentsSource):
         return {'url':target,'identity':identity}
 
     def initial_comment_records(self,html,url):
-        from .profile_hub_workers import _extract_xhamster_initials
+        from .profile_hub_workers import _extract_window_initials
         from .profile_hub_avatar_extractors import extract_image_url
-        state=_extract_xhamster_initials(html)
+        state=_extract_window_initials(html)
         component=state.get('commentsComponent')
         if not isinstance(component,dict):return None
         rows=component.get('comments')
@@ -465,11 +532,13 @@ class XHamsterCommentsSource(HTMLCommentsSource):
                 avatar=author.get('thumbURL') or author.get('thumbUrl') or author.get('avatarURL')
                 reply_to=item.get('replyToId')
                 row_parent=f'{self.id}:{reply_to}' if isinstance(reply_to,(str,int)) and not isinstance(reply_to,bool) and str(reply_to).strip() else parent
-                records.append({'id':identity,'parent':row_parent,'text':message.strip(),
-                    'author':author.get('name') if isinstance(author.get('name'),str) else '',
+                time_text = item.get('time') if isinstance(item.get('time'), str) else _format_unix_comment_time(item.get('created'))
+                records.append({'id':identity,'parent':row_parent,'text':sanitize_comment_text(message),
+                    'author':sanitize_comment_text(author.get('name'),preserve_newlines=False) if isinstance(author.get('name'),str) else '',
                     'author_url':profile,'author_thumbnail':extract_image_url(url,{'src':avatar}) if isinstance(avatar,str) else '',
-                    '_time_text':item.get('time') if isinstance(item.get('time'),str) else '',
-                    'reaction_kind':'like','like_count':exact_source_count(item.get('likes'))})
+                    '_time_text':time_text,
+                    'reaction_kind':'like','like_count':exact_source_count(item.get('likes')),
+                    'is_favorited':item.get('isLikedByOwner') if isinstance(item.get('isLikedByOwner'),bool) else None})
                 replies=item.get('replies')
                 if isinstance(replies,dict):replies=replies.get('items')
                 if isinstance(replies,list):visit(replies,identity)
@@ -487,8 +556,194 @@ class XHamsterCommentsSource(HTMLCommentsSource):
         if records is None:raise ValueError('comments_not_confirmed')
         return records
 
+    def extract_profile_audience(self, html, final_url, adapter):
+        from .profile_hub_watch_sources import format_audience_label, portal_state_profile_audience
+        raw = portal_state_profile_audience(html, final_url, adapter)
+        return format_audience_label(raw, 'subscribers')
 
-HTML_COMMENT_SOURCES=(EpornerCommentsSource,PornhubCommentsSource,XHamsterCommentsSource)
+
+class VideoPortalCommentsSource(HTMLCommentsSource):
+    """Generic JSON-backed Watch & Comment source configured by VideoPortalDescriptor."""
+
+    uses_json_comment_api = True
+
+    def __init__(self, desc):
+        self.desc = desc
+        self.id = desc.id
+        self.reaction_kind = "like_dislike"
+        self.block_class = "portal-comment"
+        self.block_selector = ".portal-comment"
+        self.identity = None
+        self.source_url = ""
+
+    def watch_fetch_url(self):
+        return self.source_url
+
+    def extract_profile_audience(self, html, final_url, adapter):
+        from .video_portal_engine import extract_portal_profile_audience
+        return extract_portal_profile_audience(html, final_url, self.desc)
+
+    def normalize_url(self, url, *, kind="directory"):
+        from .video_portal_engine import canonicalize_portal_url, extract_portal_video_id
+
+        safe = https_url(url)
+        vid = extract_portal_video_id(safe, self.desc)
+        host = (urlsplit(safe).hostname or "").lower().removeprefix("www.")
+        if not self.desc.matches_host(host) or vid != self.identity:
+            raise ValueError("comments_context_changed")
+        return canonicalize_portal_url(self.source_url or safe, self.desc) or safe
+
+    def validate_watch_document(self, tree):
+        canonicals = tree.css('link[rel="canonical"],meta[property="og:url"]')
+        for node in canonicals:
+            value = node.attributes.get("href") or node.attributes.get("content")
+            if value:
+                self.normalize_url(https_url(urljoin(self.source_url, value)))
+
+    def engagement(self, html):
+        from .video_portal_engine import extract_portal_watch_data
+
+        parsed = extract_portal_watch_data(html, self.source_url, self.desc)
+        d = parsed.get("details") or {}
+        return {
+            "like_count": d.get("like_count"),
+            "comment_count": d.get("comment_count"),
+        }
+
+    def supported_comment_sorts(self, html) -> tuple[str, ...]:
+        cfg = self.desc.comments or {}
+        templates = cfg.get("sortPathTemplates")
+        if not isinstance(templates, dict):
+            return ()
+        supported = [
+            mode for mode in ("popular", "newest")
+            if isinstance(templates.get(mode), str) and templates.get(mode)
+        ]
+        return tuple(supported) if len(supported) > 1 else ()
+
+    def initial_comment_page_url(self, html: str, *, sort: str | None = None) -> tuple[str | None, str | None]:
+        from .video_portal_engine import extract_portal_watch_data
+
+        watch_data = extract_portal_watch_data(html, self.source_url, self.desc)
+        numeric_id = watch_data.get("numeric_id")
+        if not numeric_id:
+            return None, None
+        return self._build_comment_api_url(str(numeric_id), 0, sort=sort), str(numeric_id)
+
+    def _build_comment_api_url(self, numeric_id: str, page_zero: int, *, sort: str | None = None) -> str | None:
+        cfg = self.desc.comments or {}
+        templates = cfg.get("sortPathTemplates")
+        tmpl = None
+        if isinstance(templates, dict) and sort and isinstance(templates.get(sort), str) and templates.get(sort):
+            tmpl = templates[sort]
+        if not tmpl:
+            tmpl = cfg.get("listPathTemplate")
+        if not isinstance(tmpl, str) or not tmpl:
+            return None
+        zero_based = bool(cfg.get("pageBaseZero", True))
+        p_num = page_zero + 1
+        rel = tmpl.format(numeric_id=numeric_id, page_zero=page_zero if zero_based else p_num, page=p_num)
+        return urljoin(self.desc.effective_base_url() + "/", rel)
+
+    def comment_page_identity(self, url: str) -> str:
+        # Match the numeric_id formatted inside configured listPathTemplate
+        cfg = self.desc.comments or {}
+        tmpl = str(cfg.get("listPathTemplate") or "")
+        safe = https_url(url)
+        host = (urlsplit(safe).hostname or "").lower().removeprefix("www.")
+        if not self.desc.matches_host(host):
+            raise ValueError("comments_page_context_changed")
+        # Extract segment matching {numeric_id}
+        parts = [p for p in urlsplit(safe).path.split("/") if p]
+        t_parts = [p for p in tmpl.split("/") if p]
+        for idx, tseg in enumerate(t_parts):
+            if "{numeric_id}" in tseg and idx < len(parts):
+                return f"{self.id}:{parts[idx]}"
+        return f"{self.id}:{self.identity}"
+
+    def parse_comment_json_payload(self, payload: dict, numeric_id: str, page_zero: int, *, sort: str | None = None):
+        from .video_portal_engine import canonicalize_portal_url, parse_compact_count
+
+        cfg = self.desc.comments or {}
+        container_key = cfg.get("postsContainerKey") or "posts"
+        container = payload.get(container_key) if isinstance(payload, dict) else None
+        if not isinstance(container, dict):
+            raise ValueError("comments_not_confirmed")
+
+        total_key = cfg.get("totalKey") or "nb_posts_total"
+        ids_key = cfg.get("idsKey") or "ids"
+        children_key = cfg.get("childrenKey") or "children"
+        items_key = cfg.get("itemsMapKey") or "posts"
+        rem_key = cfg.get("remainingKey") or "nb_after"
+
+        reported_total = parse_compact_count(container.get(total_key))
+        ids_list = container.get(ids_key) if isinstance(container.get(ids_key), list) else []
+        children_map = container.get(children_key) if isinstance(container.get(children_key), dict) else {}
+        items_map = container.get(items_key) if isinstance(container.get(items_key), dict) else {}
+        remaining = parse_compact_count(container.get(rem_key)) or 0
+
+        records = []
+        seen = set()
+
+        def _visit(cid, parent_id):
+            key = str(cid)
+            if not key or key in seen:
+                return
+            seen.add(key)
+            row = items_map.get(key)
+            if not isinstance(row, dict):
+                return
+            msg = str(row.get("message") or row.get("text") or "").strip()
+            if not msg:
+                return
+            votes = row.get("votes") if isinstance(row.get("votes"), dict) else {}
+            like_cnt = parse_compact_count(votes.get("nb"))
+            dislike_cnt = parse_compact_count(votes.get("nbb"))
+            raw_author_url = row.get("url")
+            author_url = canonicalize_portal_url(str(raw_author_url), self.desc) if raw_author_url else None
+            raw_pic = str(row.get("pic") or "").strip()
+            author_thumb = urljoin(self.desc.effective_base_url() + "/", raw_pic) if raw_pic else None
+
+            raw_children = children_map.get(key)
+            reported_child_count = len(raw_children) if isinstance(raw_children, list) else (int(raw_children) if isinstance(raw_children, int) and not isinstance(raw_children, bool) else 0)
+            entry_rec = {
+                "id": key,
+                "parent": parent_id,
+                "text": msg,
+                "author": str(row.get("name") or "Anonymous").strip(),
+                "author_url": author_url,
+                "author_thumbnail": author_thumb,
+                "_time_text": str(row.get("time_diff") or row.get("date") or "").strip(),
+                "like_count": like_cnt,
+                "dislike_count": dislike_cnt,
+                "reaction_kind": "like_dislike",
+            }
+            if reported_child_count > 0:
+                entry_rec["reply_count"] = reported_child_count
+            records.append(entry_rec)
+            if isinstance(raw_children, list):
+                for child_cid in raw_children:
+                    _visit(child_cid, key)
+
+        for root_cid in ids_list:
+            _visit(root_cid, "root")
+
+        following = None
+        if remaining > 0:
+            next_p_zero = page_zero + 1
+            next_url = self._build_comment_api_url(numeric_id, next_p_zero, sort=sort)
+            if next_url:
+                following = {
+                    "url": next_url,
+                    "identity": f"{self.id}:{numeric_id}",
+                    "numeric_id": numeric_id,
+                    "page_zero": next_p_zero,
+                    "sort": sort,
+                }
+        return records, following, reported_total
+
+
+HTML_COMMENT_SOURCES=(PortalGridCommentsSource,PortalTubeCommentsSource,PortalStateCommentsSource)
 
 
 def html_comment_source(url):
@@ -499,6 +754,18 @@ def html_comment_source(url):
             source=source_type()
             source.identity=identity
             source.source_url=safe
+            source.normalize_url(safe)
+            return source
+    from .connector_registry import VideoPortalDescriptor, find_connector_for_url
+    from .video_portal_engine import canonicalize_portal_url, extract_portal_video_id
+
+    conn=find_connector_for_url(safe)
+    if isinstance(conn, VideoPortalDescriptor):
+        vid_id=extract_portal_video_id(safe, conn)
+        if vid_id is not None:
+            source=VideoPortalCommentsSource(conn)
+            source.identity=vid_id
+            source.source_url=canonicalize_portal_url(safe, conn) or safe
             source.normalize_url(safe)
             return source
     return None

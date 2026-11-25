@@ -1,7 +1,7 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ChevronDown, Heart, ThumbsDown, ThumbsUp} from 'lucide-react';
 import {useAppStore} from '../../../store/useAppStore';
-import {fetchWatchCommentsPage, WatchComment, WatchCommentsPage, WatchCommentsCursorExpired} from '../../../services/profileHubWatchApi';
+import {fetchWatchCommentsPage, WatchComment, WatchCommentsPage, WatchCommentSort, WatchCommentsCursorExpired} from '../../../services/profileHubWatchApi';
 import {fetchProfileHubComments, ProfileHubCommentsResponse, SourceTimelineComment} from '../../../services/profileHubComments';
 import {SourceAvatar} from '../common/SourceAvatar';
 
@@ -19,11 +19,13 @@ const commentsPageCache = new Map<string, { page: WatchCommentsPage; entries: Wa
 
 function CommentPages({sourceUrl, parentId, ancestors = [], legacy, onReportedTotal, showHeading = true, restartRoot, active = true, suspended = false}: {sourceUrl: string; parentId?: string; ancestors?: string[]; legacy?: LegacyRequest; onReportedTotal?: (total:number|null) => void; showHeading?: boolean; restartRoot: () => void; active?: boolean; suspended?: boolean}) {
   const isEn = useAppStore(state => state.settings.language === 'en-US');
-  const cacheKey = `${sourceUrl}::${parentId || 'root'}`;
+  const [selectedSort, setSelectedSort] = useState<WatchCommentSort | undefined>(undefined);
+  const cacheKey = `${sourceUrl}::${parentId || 'root'}::${selectedSort || 'default'}`;
   const initialCached = commentsPageCache.get(cacheKey);
   const [page, setPage] = useState<WatchCommentsPage | null>(() => initialCached?.page ?? null);
   const [entries, setEntries] = useState<WatchComment[]>(() => initialCached?.entries ?? []);
   const [loading, setLoading] = useState(() => !initialCached);
+  const [supportedSorts, setSupportedSorts] = useState<WatchCommentSort[]>(() => initialCached?.page.supported_sorts ?? []);
   const reportedCallbackRef = useRef(onReportedTotal);
   reportedCallbackRef.current = onReportedTotal;
   const [error, setError] = useState(false);
@@ -56,7 +58,26 @@ function CommentPages({sourceUrl, parentId, ancestors = [], legacy, onReportedTo
         const response = await legacy.promise;
         if (response.source_url !== sourceUrl) throw new Error('Legacy comments source mismatch');
         result = {...response, entries:legacyEntries(response.comments, response.complete).filter(entry => entry.parent === (parentId || 'root')), next_cursor:null};
-      } else result = await fetchWatchCommentsPage(sourceUrl, controller.signal, cursorRef.current, parentId);
+      } else {
+        try {
+          result = await fetchWatchCommentsPage(sourceUrl, controller.signal, cursorRef.current, parentId, selectedSort);
+        } catch (firstErr) {
+          const msg = firstErr instanceof Error ? firstErr.message : '';
+          const transient =
+            !(firstErr instanceof WatchCommentsCursorExpired) &&
+            !controller.signal.aborted &&
+            (firstErr instanceof TypeError || /\(HTTP (?:502|503|504|429)\)/.test(msg));
+          if (!transient) throw firstErr;
+          await new Promise<void>((resolve, reject) => {
+            const id = window.setTimeout(resolve, 500);
+            controller.signal.addEventListener('abort', () => {
+              window.clearTimeout(id);
+              reject(new DOMException('Aborted', 'AbortError'));
+            }, {once: true});
+          });
+          result = await fetchWatchCommentsPage(sourceUrl, controller.signal, cursorRef.current, parentId, selectedSort);
+        }
+      }
       if (controller.signal.aborted || requestRef.current !== controller) return;
       if (result.entries.some(entry => entry.parent !== (parentId || 'root') || ancestorsRef.current.includes(entry.id))) throw new Error('Comment parent mismatch');
       if (result.next_cursor && result.next_cursor === cursorRef.current) throw new Error('Comment cursor did not advance');
@@ -71,6 +92,9 @@ function CommentPages({sourceUrl, parentId, ancestors = [], legacy, onReportedTo
       cursorRef.current = result.next_cursor || undefined;
       completeRef.current = result.complete || !result.next_cursor || result.status !== 'ready';
       setPage(result);
+      if (!parentId && result.supported_sorts && result.supported_sorts.length > 0) {
+        setSupportedSorts(result.supported_sorts);
+      }
       commentsPageCache.set(cacheKey, {
         page: result,
         entries: mergedEntries,
@@ -83,7 +107,26 @@ function CommentPages({sourceUrl, parentId, ancestors = [], legacy, onReportedTo
     } finally {
       if (requestRef.current === controller) { requestRef.current = null; loadingRef.current = false; setLoading(false); }
     }
-  }, [sourceUrl, parentId, legacy]);
+  }, [sourceUrl, parentId, legacy, selectedSort, cacheKey]);
+  const handleSelectSort = useCallback((nextSort: WatchCommentSort) => {
+    const activeSort = selectedSort || page?.sort || supportedSorts[0];
+    if (nextSort === activeSort) return;
+    requestRef.current?.abort();
+    requestRef.current = null;
+    loadingRef.current = false;
+    const nextCacheKey = `${sourceUrl}::${parentId || 'root'}::${nextSort}`;
+    const cached = commentsPageCache.get(nextCacheKey);
+    cursorRef.current = cached?.cursor;
+    completeRef.current = Boolean(cached?.complete);
+    pendingPageRef.current = !cached;
+    setError(false);
+    setExpired(false);
+    setExpanded(new Set());
+    setPage(cached?.page ?? null);
+    setEntries(cached?.entries ?? []);
+    setLoading(!cached);
+    setSelectedSort(nextSort);
+  }, [selectedSort, page?.sort, supportedSorts, sourceUrl, parentId]);
   useEffect(() => {
     aliveRef.current = true;
     const cached = commentsPageCache.get(cacheKey);
@@ -111,8 +154,38 @@ function CommentPages({sourceUrl, parentId, ancestors = [], legacy, onReportedTo
     observer.observe(sentinelRef.current);
     return () => observer.disconnect();
   }, [suspended, active, page, error, loading, load]);
+  const activeSort: WatchCommentSort | null = selectedSort || page?.sort || supportedSorts[0] || null;
+  const showSortToggle = !parentId && !legacy && supportedSorts.length > 1;
   return <div className="space-y-4" aria-busy={loading}>
-    {!parentId && !legacy && showHeading && <p data-source-comment-count className="text-xs font-semibold text-[var(--tl-text-secondary)]">{isEn ? 'Source comments' : 'Comentários na origem'} · {page?.reported_total ?? '—'}</p>}
+    {!parentId && !legacy && (showHeading || showSortToggle) && (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {showHeading && <p data-source-comment-count className="text-xs font-semibold text-[var(--tl-text-secondary)]">{isEn ? 'Source comments' : 'Comentários na origem'} · {page?.reported_total ?? '—'}</p>}
+        {showSortToggle && (
+          <div data-comment-sort-toggle role="group" aria-label={isEn ? 'Sort comments' : 'Ordenar comentários'} className="inline-flex items-center rounded-full border border-[var(--tl-border)] bg-[var(--tl-surface-elevated)] p-0.5 text-[11px]">
+            {supportedSorts.map(mode => {
+              const isActive = activeSort === mode;
+              const label = mode === 'popular' ? (isEn ? 'Popular' : 'Populares') : (isEn ? 'Newest' : 'Mais recentes');
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  data-comment-sort-option={mode}
+                  aria-pressed={isActive}
+                  onClick={() => handleSelectSort(mode)}
+                  className={`px-2.5 py-1 rounded-full font-semibold smooth-transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--tl-accent-hover)] ${
+                    isActive
+                      ? 'bg-[var(--tl-accent)] text-[var(--tl-accent-contrast)] shadow-sm'
+                      : 'text-[var(--tl-text-muted)] hover:text-[var(--tl-text-primary)]'
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    )}
     {entries.map(entry => {
       const authorName = entry.author || entry.handle || '—';
       const avatar = (

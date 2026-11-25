@@ -38,7 +38,7 @@ def _clean_watch_url(source,value,base):
     if not safe:return None
     identity=source.match_watch_identity(safe)
     if not identity:return None
-    if source.id=='pornhub':
+    if source.id=='portal_tube':
         # Canonical route belongs to this source adapter, not the UI.
         safe=f'https://{urlsplit(base).netloc}/view_video.php?viewkey={identity}'
     else:
@@ -69,7 +69,144 @@ def _meta(tree,selector):
     return (node.attributes.get('content') or '').strip() or None if node is not None else None
 
 
-def eporner_profile_audience(html, final_url, adapter):
+_AUDIENCE_COUNT_TOKEN = r'[0-9][0-9.,]*(?:\s*[KMBkmb])?'
+_AUDIENCE_UNIT_RE = re.compile(r'\b(subscribers?|followers?|inscritos?|seguidores?)\b', re.I)
+
+
+def format_audience_label(raw_value, kind='subscribers'):
+    """Format a source-confirmed audience count without fabricating precision."""
+    if isinstance(raw_value, bool) or raw_value is None:
+        return None, None
+    normalized_kind = 'followers' if kind == 'followers' else 'subscribers'
+    if isinstance(raw_value, int):
+        if raw_value < 0:
+            return None, None
+        return f'{raw_value:,} {normalized_kind}', normalized_kind
+    if not isinstance(raw_value, str):
+        return None, None
+    cleaned = ' '.join(raw_value.split()).strip()
+    if not cleaned:
+        return None, None
+    unit_match = _AUDIENCE_UNIT_RE.search(cleaned)
+    if unit_match:
+        unit_low = unit_match.group(1).lower()
+        detected_kind = 'followers' if ('follower' in unit_low or 'seguidor' in unit_low) else 'subscribers'
+        return cleaned, detected_kind
+    if re.fullmatch(_AUDIENCE_COUNT_TOKEN, cleaned):
+        return f'{cleaned} {normalized_kind}', normalized_kind
+    return None, None
+
+
+def _jsonld_audience_from_node(node):
+    """Extract subscriber/follower count from Schema.org interactionStatistic."""
+    if isinstance(node, list):
+        for item in node:
+            found = _jsonld_audience_from_node(item)
+            if found[0]:
+                return found
+        return None, None
+    if not isinstance(node, dict):
+        return None, None
+    stats = node.get('interactionStatistic')
+    if isinstance(stats, dict):
+        stats = [stats]
+    if isinstance(stats, list):
+        for stat in stats:
+            if not isinstance(stat, dict):
+                continue
+            itype = stat.get('interactionType')
+            if isinstance(itype, dict):
+                itype = itype.get('@type') or itype.get('name') or ''
+            itype_low = str(itype or '').lower()
+            if 'follow' in itype_low or 'subscribe' in itype_low:
+                kind = 'followers' if 'follow' in itype_low else 'subscribers'
+                count_val = stat.get('userInteractionCount')
+                if isinstance(count_val, str) and count_val.strip().isdigit():
+                    count_val = int(count_val.strip())
+                label, resolved_kind = format_audience_label(count_val, kind)
+                if label:
+                    return label, resolved_kind
+    for nested_key in ('mainEntity', 'author', '@graph'):
+        if nested_key in node:
+            found = _jsonld_audience_from_node(node[nested_key])
+            if found[0]:
+                return found
+    return None, None
+
+
+def extract_generic_profile_audience(html, final_url, adapter):
+    """Source-agnostic profile audience extractor for any existing or future source."""
+    import json
+    tree = LexborHTMLParser(html or '')
+    for node in tree.css('link[rel="canonical"],meta[property="og:url"]'):
+        value = node.attributes.get('href') or node.attributes.get('content')
+        if value:
+            try:
+                if adapter.normalize_url(urljoin(final_url, value)) != adapter.identity:
+                    return None, None
+            except ValueError:
+                return None, None
+
+    # 1. Schema.org JSON-LD interactionStatistic
+    for script in tree.css('script[type="application/ld+json"]'):
+        body = (script.text() or '').strip()
+        if not body:
+            continue
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            continue
+        label, kind = _jsonld_audience_from_node(parsed)
+        if label:
+            return label, kind
+
+    # 2. Scoped profile header / stats / subscribe containers
+    regions = tree.css(
+        '#user-info, .user-info, .user-info-block, .user-statistics, .user-stats, '
+        '.profile-info, .profile-stats, .profile-header, .channel-header, .channel-info, '
+        '.landing-info, .landing-info__counters, #pf-header, .pf-header, .pf-stats, '
+        '.subscribebutton, [data-count="subscribers"], [data-count="followers"]'
+    )
+    candidates = []
+    suffix_re = re.compile(r'\b(' + _AUDIENCE_COUNT_TOKEN + r')\s+(subscribers?|followers?|inscritos?|seguidores?)\b', re.I)
+    prefix_re = re.compile(r'\b(subscribers?|followers?|inscritos?|seguidores?)\s*[:(]\s*(' + _AUDIENCE_COUNT_TOKEN + r')', re.I)
+    button_re = re.compile(r'\bsubscribe\s*\(\s*(' + _AUDIENCE_COUNT_TOKEN + r')\s*\)', re.I)
+    for region in regions:
+        data_count = (region.attributes.get('data-count') or '').lower()
+        if data_count in ('subscribers', 'followers'):
+            lbl, knd = format_audience_label(_text(region), data_count)
+            if lbl:
+                candidates.append((lbl, knd))
+                continue
+        region_text = _text(region) or ''
+        m = suffix_re.search(region_text)
+        if m:
+            unit_low = m.group(2).lower()
+            knd = 'followers' if ('follower' in unit_low or 'seguidor' in unit_low) else 'subscribers'
+            lbl, knd = format_audience_label(m.group(1), knd)
+            if lbl:
+                candidates.append((lbl, knd))
+                continue
+        m = prefix_re.search(region_text)
+        if m:
+            unit_low = m.group(1).lower()
+            knd = 'followers' if ('follower' in unit_low or 'seguidor' in unit_low) else 'subscribers'
+            lbl, knd = format_audience_label(m.group(2), knd)
+            if lbl:
+                candidates.append((lbl, knd))
+                continue
+        m = button_re.search(region_text)
+        if m:
+            lbl, knd = format_audience_label(m.group(1), 'subscribers')
+            if lbl:
+                candidates.append((lbl, knd))
+    unique = list(dict.fromkeys(candidates))
+    if len(unique) == 1:
+        return unique[0]
+    return None, None
+
+
+def portal_grid_profile_audience(html, final_url, adapter):
     """Read only explicit profile statistics, rejecting a different canonical page."""
     tree=LexborHTMLParser(html)
     for node in tree.css('link[rel="canonical"],meta[property="og:url"]'):
@@ -86,13 +223,13 @@ def eporner_profile_audience(html, final_url, adapter):
     # Channel pages expose the uploader's count in the subscription control.
     # Require a single control so unrelated profile widgets cannot supply it.
     if re.fullmatch(r'/channel/[^/]+/?',urlsplit(final_url).path,re.I):
-        return eporner_channel_subscribers(tree)
+        return portal_grid_channel_subscribers(tree)
     return None
 
 
-def xhamster_profile_audience(html, final_url, adapter):
+def portal_state_profile_audience(html, final_url, adapter):
     """Use the same owner-statistics parser as the profile, after identity checks."""
-    from .profile_hub_workers import extract_xhamster_subscribers
+    from .profile_hub_workers import extract_portal_state_subscribers
     if adapter.normalize_url(final_url) != adapter.identity:
         return None
     tree = LexborHTMLParser(html)
@@ -100,10 +237,10 @@ def xhamster_profile_audience(html, final_url, adapter):
         value = node.attributes.get('href') or node.attributes.get('content')
         if not value or adapter.normalize_url(urljoin(final_url, value)) != adapter.identity:
             return None
-    return extract_xhamster_subscribers(tree)
+    return extract_portal_state_subscribers(tree)
 
 
-def eporner_channel_subscribers(tree):
+def portal_grid_channel_subscribers(tree):
     controls=tree.css('.subscribebutton')
     if len(controls)==1:
         value=_text(controls[0].css_first('.sbview1')) or _text(controls[0].css_first('.sbview2'))
@@ -112,6 +249,16 @@ def eporner_channel_subscribers(tree):
 
 
 def html_watch_data(source,html,final_url):
+    if getattr(source,'desc',None) is not None:
+        from .video_portal_engine import extract_portal_watch_data, extract_portal_video_id
+        tree=LexborHTMLParser(html)
+        for node in tree.css('link[rel="canonical"],meta[property="og:url"]'):
+            value=node.attributes.get('href') or node.attributes.get('content')
+            if value:
+                target_id=extract_portal_video_id(urljoin(final_url,value),source.desc)
+                if target_id and target_id!=source.identity:
+                    raise ValueError('watch_context_changed')
+        return extract_portal_watch_data(html,final_url,source.desc)
     tree=LexborHTMLParser(html)
     canonical=tree.css('link[rel="canonical"],meta[property="og:url"]')
     identities=[]
@@ -121,13 +268,13 @@ def html_watch_data(source,html,final_url):
         if target is None or target[0]!=source.identity:raise ValueError('watch_context_changed')
         identities.append(target[0])
     if not identities:raise ValueError('watch_identity_unconfirmed')
-    if source.id=='xhamster':
-        return _xhamster_watch_data(source,html,final_url)
-    if source.id=='eporner':
+    if source.id=='portal_state':
+        return _portal_state_watch_data(source,html,final_url)
+    if source.id=='portal_grid':
         section=tree.css_first('#relateddiv');cards=section.css('div.mb') if section is not None else None
         title_selector='.mbtit a';image_selector='.mbcontent img';duration_selector='.mbtim'
         author_selector='.mb-uploader a'
-    elif source.id=='pornhub':
+    elif source.id=='portal_tube':
         section=tree.css_first('#relatedVideosListing');cards=section.css('li.pcVideoListItem') if section is not None else None
         title_selector='.title a';image_selector='.phimage img';duration_selector='.duration'
         author_selector='.usernameWrap a'
@@ -149,7 +296,7 @@ def html_watch_data(source,html,final_url):
         if cards and not videos:raise ValueError('related_markup_unrecognized')
     # Descriptions remain source text. Missing source information stays unknown.
     from .profile_hub_engagement import unique_source_count
-    down_selector='#likeclick .likedown i, #likeclick .likedown small' if source.id=='eporner' else '.video-actions-menu .votesDown, #video-actions-menu .votesDown'
+    down_selector='#likeclick .likedown i, #likeclick .likedown small' if source.id=='portal_grid' else '.video-actions-menu .votesDown, #video-actions-menu .votesDown'
     dislikes=unique_source_count([node.attributes.get('data-rating') if 'data-rating' in node.attributes else _text(node) for node in tree.css(down_selector)])
     creator=_html_watch_creator(source,tree,html,final_url)
     artists=_html_watch_artists(source,tree,final_url)
@@ -160,13 +307,13 @@ def html_watch_data(source,html,final_url):
     return {'details':details,'videos':videos,'related_present':cards is not None}
 
 
-def _xhamster_watch_data(source,html,final_url):
+def _portal_state_watch_data(source,html,final_url):
     """Read the current video's explicitly declared metadata, never other cards."""
-    from .profile_hub_workers import _extract_xhamster_initials
+    from .profile_hub_workers import _extract_window_initials
     from .profile_hub_comment_sources import source_author_url
     from .profile_hub_engagement import exact_source_count
     from .profile_hub_avatar_extractors import extract_image_url
-    state=_extract_xhamster_initials(html)
+    state=_extract_window_initials(html)
     video=state.get('videoModel')
     if not isinstance(video,dict):raise ValueError('watch_metadata_unconfirmed')
     author=video.get('author') if isinstance(video.get('author'),dict) else {}
@@ -177,6 +324,17 @@ def _xhamster_watch_data(source,html,final_url):
         return value.strip() if isinstance(value,str) and value.strip() else None
     avatar_raw=author.get('thumbURL') or author.get('avatarURL')
     avatar=extract_image_url(final_url,{'src':avatar_raw}) if author_url and isinstance(avatar_raw,str) else None
+    audience_count=None;audience_kind=None
+    sub_comp=state.get('subscriptionComponent')
+    if isinstance(sub_comp,dict):
+        sub_buttons=sub_comp.get('subscribeButtonsProps')
+        sub_btn=sub_buttons.get('subscribeButtonProps') if isinstance(sub_buttons,dict) else sub_comp.get('subscribeButtonProps')
+        if isinstance(sub_btn,dict):
+            audience_count,audience_kind=format_audience_label(sub_btn.get('subscribers'),'subscribers')
+    if not audience_count:
+        audience_count,audience_kind=format_audience_label(author.get('subscribers'),'subscribers')
+    if not audience_count:
+        audience_count,audience_kind=format_audience_label(author.get('followers'),'followers')
     artists=[];seen_artists=set()
     cast=video.get('pornstars')
     if isinstance(cast,list):
@@ -221,7 +379,7 @@ def _xhamster_watch_data(source,html,final_url):
     return {'details':{'title':text_value(video.get('title')),
         'description':text_value(video.get('description')),
         'author_name':text_value(name) if author_url else None,'author_url':author_url,
-        'author_avatar_url':avatar,'audience_count_text':None,'audience_kind':None,
+        'author_avatar_url':avatar,'audience_count_text':audience_count,'audience_kind':audience_kind,
         'artists':artists,'reaction_kind':'like_dislike',
         'like_count':exact_source_count(rating.get('likes')),
         'dislike_count':exact_source_count(rating.get('dislikes')),
@@ -243,7 +401,7 @@ def _html_watch_creator(source,tree,html,final_url):
 
     from .profile_hub_avatar_extractors import extract_image_url
 
-    if source.id=='eporner':
+    if source.id=='portal_grid':
         container=tree.css_first('#video-info, #video-info-tags, #cinemainfo')
         if container is not None:
             owner=container.css_first('.vit-uploader a[href], #hd-porn-d-uploader a[href], .vit-channel a[href]')
@@ -270,7 +428,7 @@ def _html_watch_creator(source,tree,html,final_url):
                 if raw_sub and re.fullmatch(r'[0-9][0-9., ]*(?:[KMBkmb])?',raw_sub):
                     audience_count=f'{raw_sub} subscribers'
                     audience_kind='subscribers'
-    elif source.id=='pornhub':
+    elif source.id=='portal_tube':
         container=tree.css_first('.video-detailed-info .userRow, .video-detailed-info .userInfoBlock, .video-detailed-info .userInfo, .video-detailed-info')
         if container is not None:
             owner=next((node for selector in (
@@ -332,9 +490,9 @@ def _html_watch_artists(source,tree,final_url):
     """Extract source-declared featured performers/artists scoped to the video's cast block."""
     from .profile_hub_comment_sources import source_author_url
 
-    if source.id=='pornhub':
+    if source.id=='portal_tube':
         nodes=tree.css('.video-detailed-info .pornstarsWrapper a[href]')
-    elif source.id=='eporner':
+    elif source.id=='portal_grid':
         nodes=tree.css('#video-info #video-info-tags li.vit-pornstar a[href], #video-info li.starw a[href]')
     else:
         return []
@@ -345,7 +503,7 @@ def _html_watch_artists(source,tree,final_url):
         artist_url=source_author_url({'author_url':candidate},final_url) if candidate else None
         if not artist_url:continue
         path=urlsplit(artist_url).path.lower()
-        if source.id=='eporner' and not path.startswith('/pornstar/'):continue
+        if source.id=='portal_grid' and not path.startswith('/pornstar/'):continue
         key=_artist_identity_key(artist_url)
         if key in seen:continue
         name=' '.join((_text(node) or '').split())

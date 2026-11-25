@@ -2,7 +2,7 @@
  * Universal Video Player Core Logic & Mini-Player Geometry
  *
  * Pure TypeScript functions, constants, geometry calculations, and types
- * governing all video player instances across IMAGEX.AI.
+ * governing all video player instances across IMAGEX.
  *
  * Governed by docs/video-player-architecture.md & docs/superpowers/specs/2026-11-14-universal-video-player-design.md
  */

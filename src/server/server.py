@@ -62,9 +62,9 @@ from .stream_registration_lookup import StreamRegistrationLookup
 from .proxy_image_guard import is_valid_image_response
 from .trash_service import trash_service
 from .library_responses import LibraryResponseCache, accepts_gzip, album_page
-from .challenge_solver import apply_ytdlp_pornhub_patch
+from .challenge_solver import apply_ytdlp_challenge_patch
 
-apply_ytdlp_pornhub_patch()
+apply_ytdlp_challenge_patch()
 
 from ..core.models import Album, AlbumImage, ResolutionMethod, TelemetryMetrics
 from ..core.media_classification import normalize_media_item, update_album_media_metadata, apply_image_animation, verify_media_animation, filter_album_media, media_category
@@ -1265,7 +1265,7 @@ def _infer_extension_from_magic_or_mime(raw_bytes: bytes = b"", content_type: st
     return ".jpg" 
 
 
-APP_VERSION = "5.7.0"
+APP_VERSION = "5.8.0"
 
 
 @app.get("/api/health")
@@ -2354,7 +2354,7 @@ async def _ensure_animation_video_file(
         in_headers = _get_video_download_headers(target_url, referer) if (target_url.startswith("http://") or target_url.startswith("https://")) else {}
 
         # 1. UPSTREAM DIRECT MP4 CHECK (Universal fast-path for modern animation hosts)
-        # Many sites (Eporner, Imgur, Reddit, Gfycat, RedGIFs, Tenor, etc.) host the native MP4
+        # Many video portals and image hosts serve native MP4 streams directly
         # companion directly alongside the GIF/WebP.
         if target_url.startswith("http://") or target_url.startswith("https://"):
             candidate_mp4 = re.sub(r'\.(gif|webp|gifv)(\?.*)?$', r'.mp4\2', target_url, flags=re.I)
@@ -2825,11 +2825,10 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
         _save_domain_cookies()
 
     formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
-    is_pornhub = "pornhub.com" in target_page.lower()
-    if is_pornhub:
-        # For Pornhub, hv-h CDN streams (HLS format_ids) bypass rigid client-IP bindings (&ipa=1)
-        # and reliably deliver HTTP 206 partial content without 474 Unauthorized errors
-        hls_mp4s = [f for f in formats if str(f.get("format_id", "")).startswith("hls") or "hv-h.phncdn.com" in str(f.get("url", ""))]
+    is_ip_bound_hls = "viewkey=" in target_page.lower() or any("&ipa=" in str(f.get("url", "")) for f in formats)
+    if is_ip_bound_hls:
+        # Prefer HLS format_ids when progressive streams carry rigid client-IP bindings (&ipa=1)
+        hls_mp4s = [f for f in formats if str(f.get("format_id", "")).startswith("hls")]
         direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
         pool = hls_mp4s if hls_mp4s else (direct_mp4s if direct_mp4s else formats)
     else:
@@ -3350,6 +3349,55 @@ async def proxy_video_stream(
 _qualities_cache: dict[str, tuple[float, dict]] = {}
 
 
+async def _resolve_video_portal_stream_fallback(target_page: str) -> dict | None:
+    """Resolve qualities / HLS fallback for any configured VideoPortalDescriptor."""
+    from .connector_registry import VideoPortalDescriptor, find_connector_for_url
+    from .video_portal_engine import extract_portal_stream_fallback
+    from .profile_hub_service import DEFAULT_HEADERS
+    import httpx
+
+    conn = find_connector_for_url(target_page)
+    if not isinstance(conn, VideoPortalDescriptor) or not conn.stream_fallback:
+        return None
+    headers = {**DEFAULT_HEADERS, **conn.default_headers(target_page)}
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers=headers) as client:
+        resp = await client.get(target_page)
+        if resp.status_code != 200 or not resp.text:
+            return None
+        parsed = extract_portal_stream_fallback(resp.text, str(resp.url), conn)
+    hls_url = parsed.get("master_hls_url") or ""
+    q_list = []
+    for item in parsed.get("qualities") or []:
+        q_url = item.get("url") or ""
+        q_label = str(item.get("quality") or "").upper()
+        if not q_url or q_label == "AUTO":
+            continue
+        h_val = 720 if q_label == "HD" else (360 if q_label == "SD" else int(item.get("height") or 480))
+        q_list.append({
+            "height": h_val,
+            "label": f"{h_val}p HD" if h_val >= 720 else f"{h_val}p",
+            "streamUrl": f"/api/proxy-video-stream?url={urllib.parse.quote(q_url)}&referer={urllib.parse.quote(target_page)}&height={h_val}",
+            "bitrate": 0,
+            "format_id": q_label or str(h_val),
+            "ext": "mp4",
+        })
+    if not q_list and not hls_url:
+        return None
+    q_list.sort(key=lambda x: x["height"], reverse=True)
+    proxied_hls = (
+        f"/api/proxy-video-stream?url={urllib.parse.quote(hls_url)}&referer={urllib.parse.quote(target_page)}"
+        if hls_url
+        else None
+    )
+    return {
+        "is_hls": bool(hls_url),
+        "master_hls_url": proxied_hls,
+        "target_page": target_page,
+        "qualities": q_list,
+        "current_height": q_list[0]["height"] if q_list else None,
+    }
+
+
 @app.get("/api/video-stream-qualities")
 async def get_video_stream_qualities(
     url: str = Query(..., description="Target video stream URL or page URL"),
@@ -3463,7 +3511,7 @@ async def get_video_stream_qualities(
                 f for f in formats
                 if f.get("height") and f.get("ext") not in ("mhtml", "jpg", "png", "webp")
             ]
-        is_pornhub_page = "pornhub" in target_page.lower()
+        is_ip_bound_page = "viewkey=" in target_page.lower()
         if valid_video_formats:
             av_direct_mp4 = [
                 f for f in valid_video_formats
@@ -3473,15 +3521,14 @@ async def get_video_stream_qualities(
                 and ".m3u8" not in str(f.get("url") or "").lower()
                 and f.get("ext") == "mp4"
             ]
-            if not master_hls_url and not is_pornhub_page and av_direct_mp4:
+            if not master_hls_url and not is_ip_bound_page and av_direct_mp4:
                 valid_video_formats = av_direct_mp4
-            elif not master_hls_url and not is_pornhub_page:
+            elif not master_hls_url and not is_ip_bound_page:
                 av_valid = [f for f in valid_video_formats if f.get("acodec") not in (None, "none")]
                 if av_valid:
                     valid_video_formats = av_valid
 
-        # Eporner /xhr/video provides adaptive H.264/AAC HLS (4s .ts segments), avoiding
-        # 387MB moov-at-EOF progressive MP4 stalls and AV1 failures on mobile Chrome.
+        # Adaptive H.264/AAC HLS endpoint avoids large moov-at-EOF progressive MP4 stalls on mobile Chrome.
         if not master_hls_url and callable(globals().get("get_embed_xhr_url")) and callable(globals().get("_encode_b36_hash")):
             is_direct_p, direct_vid, _ = matches_direct_extractor_provider(target_page)
             if is_direct_p and direct_vid:
@@ -3587,23 +3634,35 @@ async def get_video_stream_qualities(
             "current_height": mapped_current_height or (qualities_list[0]["height"] if qualities_list else None)
         }
         if not qualities_list and not proxied_master_hls:
+            portal_fallback = await _resolve_video_portal_stream_fallback(target_page)
+            if portal_fallback is not None:
+                _qualities_cache[cache_key] = (now, portal_fallback)
+                return Response(content=json.dumps(portal_fallback), media_type="application/json", headers=cors_headers)
             result["diagnostic"] = {"stage": "resolution", "code": "no_formats"}
         _qualities_cache[cache_key] = (now, result)
         return Response(content=json.dumps(result), media_type="application/json", headers=cors_headers)
     except Exception as exc:
-        if target_page and ("xhamster" in target_page or "/shorts/" in target_page):
+        if target_page:
+            try:
+                portal_fallback = await _resolve_video_portal_stream_fallback(target_page)
+                if portal_fallback is not None:
+                    _qualities_cache[cache_key] = (now, portal_fallback)
+                    return Response(content=json.dumps(portal_fallback), media_type="application/json", headers=cors_headers)
+            except Exception:
+                pass
+        if target_page and ("/shorts/" in target_page or "/videos/" in target_page):
             try:
                 import ssl
                 import certifi
                 import httpx
-                from .profile_hub_workers import _extract_xhamster_initials
+                from .profile_hub_workers import _extract_window_initials
                 from .profile_hub_service import DEFAULT_HEADERS
                 ssl_ctx = ssl.create_default_context(cafile=certifi.where())
                 ssl_ctx.load_default_certs()
                 async with httpx.AsyncClient(verify=ssl_ctx, timeout=10, follow_redirects=True, headers=DEFAULT_HEADERS) as client:
                     resp = await client.get(target_page)
                     if resp.status_code == 200:
-                        init = _extract_xhamster_initials(resp.text)
+                        init = _extract_window_initials(resp.text)
                         sources = init.get("xplayerSettings", {}).get("sources", {})
                         hls_url = sources.get("hls", {}).get("h264", {}).get("url")
                         std_list = sources.get("standard", {}).get("h264", [])
@@ -8975,30 +9034,411 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
 
 
 def normalize_incoming_scraper_url(url: str) -> str:
-    """
-    Normaliza URLs de entrada para o Web Video Scraper:
-    1. Des-amplifica URLs mobile AMP (ex: https://amp.xvideos.com/... -> https://www.xvideos.com/...)
-    2. Garante protocolo e remove fragmentos/residuos redundantes.
-    3. Converte subdomínios traduzidos do Pornhub (ex: pt.pornhub.com, es.pornhub.com -> www.pornhub.com)
-       para preservar os títulos originais em inglês e evitar traduções automáticas indesejadas.
-    4. Para perfis de criadores/pornstars/modelos/canais do Xvideos ou Pornhub que abrem por padrão
-       na aba resumo (com poucos vídeos e sem paginação completa), redireciona automaticamente para
-       o catálogo completo de vídeos:
-       - Xvideos: adiciona #_tabVideos
-       - Pornhub: adiciona /videos se for URL raiz do perfil
-    """
+    """Normalize a scan URL and select the configured profile tab when appropriate."""
     if not url:
         return url
     u = url.strip()
-    u = re.sub(r"^https?://amp\.(xvideos\.[a-z.]+)", r"https://www.\1", u, flags=re.I)
     u = re.sub(r"^https?://amp\.", "https://www.", u, flags=re.I)
-    u = re.sub(r"^https?://(?:pt|es|de|fr|it|nl|pl|rt|jp|cz|cn|ar|fil)\.(pornhub\.[a-z.]+)", r"https://www.\1", u, flags=re.I)
-    u = re.sub(r"^https?://(?:pt|es|de|fr|it|nl|pl|rt|jp|cz|cn|ar|fil)\.(xhamster\.[a-z.]+)", r"https://\1", u, flags=re.I)
-    if re.search(r"xvideos\.[a-z.]+/(?:pornstars|channels|models|profiles)/[a-zA-Z0-9_\-]+/?$", u, re.I):
-        u = u.rstrip("/") + "#_tabVideos"
-    if re.search(r"pornhub\.[a-z.]+/(?:pornstar|model|channels|users)/[a-zA-Z0-9_\-]+/?$", u, re.I):
-        u = u.rstrip("/") + "/videos"
+    rules = _video_scraper_rules(u)
+    path_regex = rules.get("profileRootPathRegex")
+    initial_hash = rules.get("initialHash")
+    if path_regex and initial_hash and "?" not in u and "#" not in u:
+        if re.fullmatch(path_regex, urlparse(u).path, flags=re.I):
+            u = u.rstrip("/") + initial_hash
     return u
+
+
+def _video_scraper_rules(url: str) -> dict[str, Any]:
+    from .connector_registry import VideoPortalDescriptor, find_connector_for_url
+
+    try:
+        connector = find_connector_for_url(url)
+    except ValueError:
+        return {}
+    return connector.scraper if isinstance(connector, VideoPortalDescriptor) else {}
+
+
+async def _extract_scraper_page(page, page_count: int) -> dict:
+    # Resolve rules for the loaded page and linked origins through the same registry.
+    origins = await page.evaluate("""() => {
+        const origins = new Set([window.location.origin]);
+        for (const anchor of document.querySelectorAll('a[href]')) {
+            if (anchor.protocol === 'https:' || anchor.protocol === 'http:') {
+                origins.add(anchor.origin);
+            }
+        }
+        return Array.from(origins);
+    }""")
+    rules_by_origin = {}
+    for origin in origins:
+        rules = _video_scraper_rules(origin)
+        if rules:
+            rules_by_origin[origin] = rules
+    return await page.evaluate(r"""({ curPageNum, rulesByOrigin }) => {
+    const items = [];
+    const localSeenIds = new Set();
+
+    const scraperRules = new Map(Object.entries(rulesByOrigin).map(([origin, rules]) => [
+        origin,
+        {
+            ...rules,
+            idPatterns: (rules.idPathRegexes || []).map(pattern => new RegExp(pattern)),
+            canonicalPattern: rules.canonicalLink?.pathRegex
+                ? new RegExp(rules.canonicalLink.pathRegex)
+                : null,
+        },
+    ]));
+    const pagination = scraperRules.get(window.location.origin)?.pagination;
+
+    function canonicalizeLink(anchor) {
+        const rules = scraperRules.get(anchor.origin);
+        if (!rules?.canonicalPattern || !rules.canonicalLink.pathTemplate) return anchor.href;
+        if (!rules.canonicalPattern.test(anchor.pathname)) return anchor.href;
+        const path = anchor.pathname.replace(rules.canonicalPattern, rules.canonicalLink.pathTemplate);
+        return new URL(path, anchor.origin).href;
+    }
+
+    function nextHref(element) {
+        const href = element?.href;
+        if (!href || href.startsWith('javascript:') || href.startsWith('#')) return null;
+        if (pagination?.hashPrefix && element.getAttribute('href')?.trim() === '#') return null;
+        return href;
+    }
+
+    function nextHashUrl(element) {
+        if (!pagination?.hashPrefix) return null;
+        const dataPage = Number.parseInt(element.getAttribute('data-page'), 10);
+        const pageNumber = Number.isNaN(dataPage)
+            ? curPageNum + 1
+            : dataPage + (pagination.pageOffset ?? 1);
+        const activePrefix = window.location.hash.split(',')[0];
+        const prefix = pagination.existingHashPrefix && activePrefix.startsWith(pagination.existingHashPrefix)
+            ? activePrefix
+            : pagination.hashPrefix;
+        const url = new URL(window.location.href);
+        url.hash = prefix + (pagination.pageSuffix ?? ',page-') + pageNumber;
+        return url.href;
+    }
+
+    function extractVideoId(href, a) {
+        if (!href) return null;
+        if (a && a.closest && a.closest('header, nav, #header, #headerWrapper, .language-select, .languageMenu, .headerMenu, footer, .footer')) return null;
+        const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
+        if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
+
+        // Slug-ID video pattern: /videos/title-slug-ID or /movies/ID/slug.html
+        const mSlugId = href.match(/\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
+                        href.match(/\/movies\/([a-zA-Z0-9]+)/i);
+        if (mSlugId && mSlugId[1] && mSlugId[1].toLowerCase().startsWith('xh')) {
+            return 'vid_' + mSlugId[1];
+        }
+
+        // Provider A pattern: /video-VuuljJoHUPf/
+        const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
+        if (mEp) return 'ep_' + mEp[1];
+
+        // Provider B pattern: ?viewkey=...
+        const mVk = href.match(/viewkey=([a-zA-Z0-9]+)/);
+        if (mVk) return 'vk_' + mVk[1];
+
+        const rules = scraperRules.get(a?.origin);
+        for (const pattern of rules?.idPatterns || []) {
+            const match = pattern.exec(a.pathname);
+            if (match?.[1] && match[1].toLowerCase() !== 's') return 'cfg_' + match[1];
+        }
+
+        // Generic tube patterns: /video/ID, /videos/ID, /watch/ID, /watch?v=ID
+        const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
+        if (mGen && mGen[1].toLowerCase() !== 's') return 'gen_' + mGen[1];
+
+        return null;
+    }
+
+    function extractThumbnail(container) {
+        if (!container) return '';
+        const img = container.querySelector('img');
+        if (img) {
+            const src = img.getAttribute('data-src') ||
+                        img.getAttribute('data-thumb_url') ||
+                        img.getAttribute('data-mediumthumb') ||
+                        img.getAttribute('data-lazy-src') ||
+                        img.getAttribute('data-original') ||
+                        img.getAttribute('data-thumb') ||
+                        img.getAttribute('data-preview') ||
+                        img.getAttribute('data-poster') ||
+                        img.getAttribute('src');
+            if (src && !src.startsWith('data:image/svg') && !src.includes('placeholder')) {
+                return src.startsWith('//') ? 'https:' + src : src;
+            }
+            if (img.srcset) {
+                const parts = img.srcset.split(',');
+                if (parts.length > 0) {
+                    const first = parts[0].trim().split(' ')[0];
+                    if (first) return first.startsWith('//') ? 'https:' + first : first;
+                }
+            }
+        }
+        // Check background-image
+        const bgEls = [container, ...(container.querySelectorAll ? container.querySelectorAll('*') : [])];
+        for (const el of bgEls.slice(0, 8)) {
+            const style = el.getAttribute ? (el.getAttribute('style') || '') : '';
+            const mBg = style.match(/background-image:\s*url\(['"]?(https?:\/\/[^'")]+)['"]?\)/i);
+            if (mBg) return mBg[1];
+        }
+        return '';
+    }
+
+    function isJunkTitle(t) {
+        if (!t) return true;
+        const clean = t.replace(/\s+/g, ' ').trim();
+        if (!clean || clean.length < 2) return true;
+        const junkRegex = /^(?:(?:\d{3,4}p|\d+k|hd|full\s*hd|sd|cc|fps|\d+:\d+|\d+\s*min(?:utes?)?|\d+\s*sec(?:onds?)?|new|vr|free)\s*)+$/i;
+        if (junkRegex.test(clean)) return true;
+        if (/^\d+$/.test(clean)) return true;
+        const low = clean.toLowerCase();
+        if (['play all', 'play all videos', 'reproduzir tudo', 'reproducir todo', 'tout lire'].includes(low)) return true;
+        return false;
+    }
+
+    function extractTitleFromSlug(href) {
+        if (!href) return '';
+        try {
+            const mXh = href.match(/\/videos\/(.+?)(?:-[a-zA-Z0-9]+)?(?:[?#]|$)/);
+            if (mXh && mXh[1] && mXh[1].length > 3) {
+                let slug = mXh[1].replace(/-(?:xh[a-zA-Z0-9]+|\d+)$/i, '');
+                slug = slug.replace(/^[\-_]+|[\-_]+$/g, '');
+                let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+                if (clean.length > 3 && !isJunkTitle(clean)) {
+                    return clean.replace(/\b\w/g, c => c.toUpperCase());
+                }
+            }
+            const m = href.match(/\/video[0-9a-zA-Z._-]*\/([a-zA-Z0-9_\-\.%]+)/);
+            if (m && m[1]) {
+                let slug = m[1].replace(/^[\-_]+|[\-_]+$/g, '');
+                slug = slug.replace(/\.[a-zA-Z0-9]{2,4}$/, '');
+                let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+                if (clean.length > 3 && !isJunkTitle(clean)) {
+                    return clean.replace(/\b\w/g, c => c.toUpperCase());
+                }
+            }
+        } catch (_) {}
+        return '';
+    }
+
+    function cleanTitleText(t, cardEl) {
+        if (!t) return '';
+        let cleaned = t;
+        if (cardEl) {
+            const nestedDur = cardEl.querySelector('.mbtim, .duration, .time, .badge-duration');
+            if (nestedDur && nestedDur.innerText) {
+                const durText = nestedDur.innerText.trim();
+                if (durText && cleaned.includes(durText)) {
+                    cleaned = cleaned.replace(durText, ' ');
+                }
+            }
+        }
+        cleaned = cleaned.replace(/\s+/g, ' ')
+                         .replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '')
+                         .replace(/^(?:1080p|720p|4k|hd|sd|cc)\s+/i, '')
+                         .replace(/\s+(?:1080p|720p|4k|hd|sd|cc)$/i, '')
+                         .trim();
+        return cleaned;
+    }
+
+    const allLinks = Array.from(document.querySelectorAll('a[href]'));
+    const idMap = new Map();
+
+    allLinks.forEach(a => {
+        const rawId = extractVideoId(a.href, a);
+        if (!rawId) return;
+
+        if (!idMap.has(rawId)) {
+            idMap.set(rawId, {
+                rawId: rawId,
+                anchors: [],
+                href: a.href,
+                card: null
+            });
+        }
+        const entry = idMap.get(rawId);
+        entry.anchors.push(a);
+
+        if (!entry.card) {
+            let cardCandidate = a.closest('.video-thumb, .thumb-list__item, .frame-block, .thumb-block, .video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, [id^="video_"], .video-card, li, td') || a.parentElement || a;
+            if (cardCandidate && cardCandidate.classList && cardCandidate.classList.contains('thumb') && !cardCandidate.classList.contains('thumb-block')) {
+                const outer = cardCandidate.closest('.frame-block, .thumb-block, .video-box, .item-video, .video-item, article, [id^="video_"]');
+                if (outer) cardCandidate = outer;
+            }
+            entry.card = cardCandidate;
+        }
+    });
+
+    idMap.forEach((entry, rawId) => {
+        if (localSeenIds.has(rawId)) return;
+        localSeenIds.add(rawId);
+
+        const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
+        const card = entry.card || (entry.anchors[0] ? entry.anchors[0].parentElement : null) || entry.anchors[0];
+        const primaryA = entry.anchors[0];
+
+        let thumb = '';
+        if (card) thumb = extractThumbnail(card);
+        if (!thumb) {
+            for (const a of entry.anchors) {
+                thumb = extractThumbnail(a);
+                if (thumb) break;
+            }
+        }
+
+        let title = '';
+
+        for (const a of entry.anchors) {
+            const aTitle = cleanTitleText(a.getAttribute('title') || '', a);
+            if (aTitle && !isJunkTitle(aTitle)) {
+                title = aTitle;
+                break;
+            }
+            const imgAlt = cleanTitleText(a.querySelector('img')?.getAttribute('alt') || '', a);
+            if (imgAlt && !isJunkTitle(imgAlt)) {
+                title = imgAlt;
+                break;
+            }
+        }
+
+        if (!title && card) {
+            const titleEl = card.querySelector('.video-thumb-info__name, [class*="thumb-info__name"], .title, .video-title, h3, h4, h2, .name');
+            if (titleEl) {
+                const candidate = cleanTitleText(titleEl.getAttribute('title') || titleEl.innerText || '', titleEl);
+                if (!isJunkTitle(candidate)) {
+                    title = candidate;
+                }
+            }
+        }
+
+        if (!title) {
+            for (const a of entry.anchors) {
+                const aImgTitle = cleanTitleText(a.querySelector('img')?.getAttribute('title') || '', a);
+                if (aImgTitle && !isJunkTitle(aImgTitle)) {
+                    title = aImgTitle;
+                    break;
+                }
+                const aText = cleanTitleText(a.innerText || '', a);
+                if (aText && !isJunkTitle(aText)) {
+                    title = aText;
+                    break;
+                }
+            }
+        }
+
+        if (!title) {
+            for (const a of entry.anchors) {
+                const slugTitle = extractTitleFromSlug(a.href);
+                if (slugTitle && !isJunkTitle(slugTitle)) {
+                    title = slugTitle;
+                    break;
+                }
+            }
+        }
+
+        const durEl = card ? card.querySelector('.thumb-image-container__duration, [class*="thumb-image-container__duration"], .mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]') : null;
+        const duration = durEl ? durEl.innerText.trim() : '';
+
+        const qEl = card ? card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]') : null;
+        let quality = qEl ? qEl.innerText.trim() : '';
+        if (!quality) {
+            for (const a of entry.anchors) {
+                const rawTxt = (a.innerText || '').trim();
+                const mQ = rawTxt.match(/(\d{3,4}p|4k|hd)/i);
+                if (mQ) {
+                    quality = mQ[1].toUpperCase();
+                    break;
+                }
+            }
+        }
+        if (!quality) quality = '1080p HD';
+
+        const isPrimary = card ? (
+            (
+                !!card.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list, .thumb-list, .pornstar-content__main, [class*="videoSection"], [class*="index-videos"], main, #main') ||
+                !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
+            ) &&
+            !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
+        ) : true;
+        const section = isPrimary ? 'main' : 'recommended';
+
+        let finalUrl = primaryA ? canonicalizeLink(primaryA) : entry.href;
+        const mVkClean = finalUrl.match(/viewkey=([a-zA-Z0-9]+)/);
+        if (mVkClean) {
+            try {
+                const uObj = new URL(finalUrl);
+                finalUrl = uObj.origin + '/view_video.php?viewkey=' + mVkClean[1];
+            } catch {}
+        }
+        items.push({
+            id: cleanId,
+            url: finalUrl,
+            title: title || ('Vídeo ' + (items.length + 1)),
+            thumbnail_url: thumb,
+            duration: duration,
+            quality_hint: quality,
+            section: section,
+            is_primary: isPrimary,
+            page_found: curPageNum
+        });
+    });
+
+    // Multi-strategy Next Page Detection
+    // Strategy 1: Explicit <link rel="next"> or <a rel="next">
+    const relNext = document.querySelector('link[rel="next"], a[rel="next"], a.prev-next-list-link--next, [class*="next-page"]');
+    let nextUrl = nextHref(relNext);
+    if (!nextUrl && relNext?.hasAttribute('data-page')) nextUrl = nextHashUrl(relNext);
+
+    // Strategy 2: Pagination container selectors with next classes
+    if (!nextUrl) {
+        const nextSel = document.querySelector('.pagination .next a, .pagination a.next, a.next_page, a.next-page, a.pagination-next, .pagination-next a, .page-next a, li.page_next a, .page_next a, a#next_page, a.nextPage, [aria-label*="Next" i], [title*="Next page" i], [title*="Próxima" i]');
+        if (nextSel) nextUrl = nextHref(nextSel) || nextHashUrl(nextSel);
+    }
+
+    // Strategy 3: Text content inspection of anchors
+    if (!nextUrl) {
+        for (const a of allLinks) {
+            const txt = (a.innerText || '').trim().toLowerCase();
+            const title = (a.getAttribute('title') || '').trim().toLowerCase();
+            const aria = (a.getAttribute('aria-label') || '').trim().toLowerCase();
+            const cls = (a.className || '').toString().toLowerCase();
+
+            const isNextMatch = (
+                txt === 'next' || txt === 'next »' || txt === 'next >' || txt === 'next ›' ||
+                txt === '»' || txt === '›' || txt === 'próxima' || txt === 'proxima' ||
+                txt === 'seguinte' || txt === 'suivante' || txt === 'weiter' ||
+                title.includes('next page') || title.includes('próxima') || aria.includes('next page') ||
+                cls.includes('pagination-next') || cls.includes('next-page')
+            );
+
+            if (isNextMatch) {
+                nextUrl = nextHref(a) || nextHashUrl(a);
+                if (nextUrl) break;
+            }
+        }
+    }
+
+    // Strategy 4: Numbered pagination next link (e.g. curPageNum + 1)
+    if (!nextUrl) {
+        const nextPageNumStr = String(curPageNum + 1);
+        for (const a of allLinks) {
+            const txt = (a.innerText || '').trim();
+            if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, [class*="pagination"], nav, ul, ol')) {
+                nextUrl = nextHref(a) || nextHashUrl(a);
+                if (nextUrl) break;
+            }
+        }
+    }
+
+    return { items: items, nextUrl: nextUrl };
+}""", {
+        "curPageNum": page_count,
+        "rulesByOrigin": rules_by_origin,
+    })
 
 
 @app.post("/api/video-scraper/scan-page")
@@ -9103,361 +9543,7 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                     suggested_folder = suggest_smart_folder_name(target_url, clean_page_title)
 
                 # Universal DOM video extractor + Next Page Detection
-                page_data = await page.evaluate(r"""(curPageNum) => {
-                    const items = [];
-                    const localSeenIds = new Set();
-
-                    function extractVideoId(href, a) {
-                        if (!href) return null;
-                        if (a && a.closest && a.closest('header, nav, #header, #headerWrapper, .language-select, .languageMenu, .headerMenu, footer, .footer')) return null;
-                        const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
-                        if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
-
-                        // xHamster pattern: /videos/title-slug-xhXXXXX or /movies/ID/slug.html
-                        const mXh = href.match(/xhamster\.[a-z.]+\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
-                                    href.match(/\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
-                                    href.match(/xhamster\.[a-z.]+\/movies\/([a-zA-Z0-9]+)/i);
-                        if (mXh && (href.includes('xhamster') || (mXh[1] && mXh[1].toLowerCase().startsWith('xh')))) {
-                            return 'xh_' + (mXh[1] || mXh[2]);
-                        }
-
-                        // Provider A pattern: /video-VuuljJoHUPf/
-                        const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
-                        if (mEp) return 'ep_' + mEp[1];
-
-                        // Provider B pattern: ?viewkey=ph60a...
-                        const mPh = href.match(/viewkey=([a-zA-Z0-9]+)/);
-                        if (mPh) return 'ph_' + mPh[1];
-                        if (href.includes('pornhub')) return null;
-
-                        // Provider C pattern (XVideos): /video123456/ or /video.abcde/
-                        if (href.includes('xvideos')) {
-                            const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
-                            if (mXvProf) return 'xv_' + mXvProf[1];
-                            const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//) || href.match(/\/video([a-zA-Z0-9]+)\//);
-                            if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
-                        } else {
-                            const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
-                            if (mXvProf) return 'xv_' + mXvProf[1];
-                            const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
-                            if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
-                        }
-
-                        // Generic tube patterns: /video/ID, /videos/ID, /watch/ID, /watch?v=ID
-                        const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
-                        if (mGen && mGen[1].toLowerCase() !== 's') return 'gen_' + mGen[1];
-
-                        return null;
-                    }
-
-                    function extractThumbnail(container) {
-                        if (!container) return '';
-                        const img = container.querySelector('img');
-                        if (img) {
-                            const src = img.getAttribute('data-src') ||
-                                        img.getAttribute('data-thumb_url') ||
-                                        img.getAttribute('data-mediumthumb') ||
-                                        img.getAttribute('data-lazy-src') ||
-                                        img.getAttribute('data-original') ||
-                                        img.getAttribute('data-thumb') ||
-                                        img.getAttribute('data-preview') ||
-                                        img.getAttribute('data-poster') ||
-                                        img.getAttribute('src');
-                            if (src && !src.startsWith('data:image/svg') && !src.includes('placeholder')) {
-                                return src.startsWith('//') ? 'https:' + src : src;
-                            }
-                            if (img.srcset) {
-                                const parts = img.srcset.split(',');
-                                if (parts.length > 0) {
-                                    const first = parts[0].trim().split(' ')[0];
-                                    if (first) return first.startsWith('//') ? 'https:' + first : first;
-                                }
-                            }
-                        }
-                        // Check background-image
-                        const bgEls = [container, ...(container.querySelectorAll ? container.querySelectorAll('*') : [])];
-                        for (const el of bgEls.slice(0, 8)) {
-                            const style = el.getAttribute ? (el.getAttribute('style') || '') : '';
-                            const mBg = style.match(/background-image:\s*url\(['"]?(https?:\/\/[^'")]+)['"]?\)/i);
-                            if (mBg) return mBg[1];
-                        }
-                        return '';
-                    }
-
-                    function isJunkTitle(t) {
-                        if (!t) return true;
-                        const clean = t.replace(/\s+/g, ' ').trim();
-                        if (!clean || clean.length < 2) return true;
-                        const junkRegex = /^(?:(?:\d{3,4}p|\d+k|hd|full\s*hd|sd|cc|fps|\d+:\d+|\d+\s*min(?:utes?)?|\d+\s*sec(?:onds?)?|new|vr|free)\s*)+$/i;
-                        if (junkRegex.test(clean)) return true;
-                        if (/^\d+$/.test(clean)) return true;
-                        const low = clean.toLowerCase();
-                        if (['play all', 'play all videos', 'reproduzir tudo', 'reproducir todo', 'tout lire'].includes(low)) return true;
-                        return false;
-                    }
-
-                    function extractTitleFromSlug(href) {
-                        if (!href) return '';
-                        try {
-                            const mXh = href.match(/\/videos\/(.+?)(?:-[a-zA-Z0-9]+)?(?:[?#]|$)/);
-                            if (mXh && mXh[1] && mXh[1].length > 3) {
-                                let slug = mXh[1].replace(/-(?:xh[a-zA-Z0-9]+|\d+)$/i, '');
-                                slug = slug.replace(/^[\-_]+|[\-_]+$/g, '');
-                                let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
-                                if (clean.length > 3 && !isJunkTitle(clean)) {
-                                    return clean.replace(/\b\w/g, c => c.toUpperCase());
-                                }
-                            }
-                            const m = href.match(/\/video[0-9a-zA-Z._-]*\/([a-zA-Z0-9_\-\.%]+)/);
-                            if (m && m[1]) {
-                                let slug = m[1].replace(/^[\-_]+|[\-_]+$/g, '');
-                                slug = slug.replace(/\.[a-zA-Z0-9]{2,4}$/, '');
-                                let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
-                                if (clean.length > 3 && !isJunkTitle(clean)) {
-                                    return clean.replace(/\b\w/g, c => c.toUpperCase());
-                                }
-                            }
-                        } catch (_) {}
-                        return '';
-                    }
-
-                    function cleanTitleText(t, cardEl) {
-                        if (!t) return '';
-                        let cleaned = t;
-                        if (cardEl) {
-                            const nestedDur = cardEl.querySelector('.mbtim, .duration, .time, .badge-duration');
-                            if (nestedDur && nestedDur.innerText) {
-                                const durText = nestedDur.innerText.trim();
-                                if (durText && cleaned.includes(durText)) {
-                                    cleaned = cleaned.replace(durText, ' ');
-                                }
-                            }
-                        }
-                        cleaned = cleaned.replace(/\s+/g, ' ')
-                                         .replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '')
-                                         .replace(/^(?:1080p|720p|4k|hd|sd|cc)\s+/i, '')
-                                         .replace(/\s+(?:1080p|720p|4k|hd|sd|cc)$/i, '')
-                                         .trim();
-                        return cleaned;
-                    }
-
-                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                    const idMap = new Map();
-
-                    allLinks.forEach(a => {
-                        const rawId = extractVideoId(a.href, a);
-                        if (!rawId) return;
-
-                        if (!idMap.has(rawId)) {
-                            idMap.set(rawId, {
-                                rawId: rawId,
-                                anchors: [],
-                                href: a.href,
-                                card: null
-                            });
-                        }
-                        const entry = idMap.get(rawId);
-                        entry.anchors.push(a);
-
-                        if (!entry.card) {
-                            let cardCandidate = a.closest('.video-thumb, .thumb-list__item, .frame-block, .thumb-block, .video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, [id^="video_"], .video-card, li, td') || a.parentElement || a;
-                            if (cardCandidate && cardCandidate.classList && cardCandidate.classList.contains('thumb') && !cardCandidate.classList.contains('thumb-block')) {
-                                const outer = cardCandidate.closest('.frame-block, .thumb-block, .video-box, .item-video, .video-item, article, [id^="video_"]');
-                                if (outer) cardCandidate = outer;
-                            }
-                            entry.card = cardCandidate;
-                        }
-                    });
-
-                    idMap.forEach((entry, rawId) => {
-                        if (localSeenIds.has(rawId)) return;
-                        localSeenIds.add(rawId);
-
-                        const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
-                        const card = entry.card || (entry.anchors[0] ? entry.anchors[0].parentElement : null) || entry.anchors[0];
-                        const primaryA = entry.anchors[0];
-
-                        let thumb = '';
-                        if (card) thumb = extractThumbnail(card);
-                        if (!thumb) {
-                            for (const a of entry.anchors) {
-                                thumb = extractThumbnail(a);
-                                if (thumb) break;
-                            }
-                        }
-
-                        let title = '';
-
-                        for (const a of entry.anchors) {
-                            const aTitle = cleanTitleText(a.getAttribute('title') || '', a);
-                            if (aTitle && !isJunkTitle(aTitle)) {
-                                title = aTitle;
-                                break;
-                            }
-                            const imgAlt = cleanTitleText(a.querySelector('img')?.getAttribute('alt') || '', a);
-                            if (imgAlt && !isJunkTitle(imgAlt)) {
-                                title = imgAlt;
-                                break;
-                            }
-                        }
-
-                        if (!title && card) {
-                            const titleEl = card.querySelector('.video-thumb-info__name, [class*="thumb-info__name"], .title, .video-title, h3, h4, h2, .name');
-                            if (titleEl) {
-                                const candidate = cleanTitleText(titleEl.getAttribute('title') || titleEl.innerText || '', titleEl);
-                                if (!isJunkTitle(candidate)) {
-                                    title = candidate;
-                                }
-                            }
-                        }
-
-                        if (!title) {
-                            for (const a of entry.anchors) {
-                                const aImgTitle = cleanTitleText(a.querySelector('img')?.getAttribute('title') || '', a);
-                                if (aImgTitle && !isJunkTitle(aImgTitle)) {
-                                    title = aImgTitle;
-                                    break;
-                                }
-                                const aText = cleanTitleText(a.innerText || '', a);
-                                if (aText && !isJunkTitle(aText)) {
-                                    title = aText;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (!title) {
-                            for (const a of entry.anchors) {
-                                const slugTitle = extractTitleFromSlug(a.href);
-                                if (slugTitle && !isJunkTitle(slugTitle)) {
-                                    title = slugTitle;
-                                    break;
-                                }
-                            }
-                        }
-
-                        const durEl = card ? card.querySelector('.thumb-image-container__duration, [class*="thumb-image-container__duration"], .mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]') : null;
-                        const duration = durEl ? durEl.innerText.trim() : '';
-
-                        const qEl = card ? card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]') : null;
-                        let quality = qEl ? qEl.innerText.trim() : '';
-                        if (!quality) {
-                            for (const a of entry.anchors) {
-                                const rawTxt = (a.innerText || '').trim();
-                                const mQ = rawTxt.match(/(\d{3,4}p|4k|hd)/i);
-                                if (mQ) {
-                                    quality = mQ[1].toUpperCase();
-                                    break;
-                                }
-                            }
-                        }
-                        if (!quality) quality = '1080p HD';
-
-                        const isPrimary = card ? (
-                            (
-                                !!card.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list, .thumb-list, .pornstar-content__main, [class*="videoSection"], [class*="index-videos"], main, #main') ||
-                                !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
-                            ) &&
-                            !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
-                        ) : true;
-                        const section = isPrimary ? 'main' : 'recommended';
-
-                        let finalUrl = primaryA ? primaryA.href : entry.href;
-                        const mXvProfRedirect = finalUrl.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)\/([a-zA-Z0-9_\-\.\%]+)/);
-                        if (mXvProfRedirect) {
-                            finalUrl = 'https://www.xvideos.com/video.' + mXvProfRedirect[1] + '/' + mXvProfRedirect[2];
-                        }
-                        if (finalUrl.includes('pornhub.com')) {
-                            const mPhClean = finalUrl.match(/viewkey=([a-zA-Z0-9]+)/);
-                            if (mPhClean) {
-                                finalUrl = 'https://www.pornhub.com/view_video.php?viewkey=' + mPhClean[1];
-                            }
-                        }
-                        if (finalUrl.includes('xhamster')) {
-                            finalUrl = finalUrl.replace(/^https?:\/\/[a-z]{2,3}\.xhamster\./i, 'https://xhamster.');
-                        }
-                        items.push({
-                            id: cleanId,
-                            url: finalUrl,
-                            title: title || ('Vídeo ' + (items.length + 1)),
-                            thumbnail_url: thumb,
-                            duration: duration,
-                            quality_hint: quality,
-                            section: section,
-                            is_primary: isPrimary,
-                            page_found: curPageNum
-                        });
-                    });
-
-                    // Multi-strategy Next Page Detection
-                    let nextUrl = null;
-
-                    // Strategy 1: Explicit <link rel="next"> or <a rel="next">
-                    const relNext = document.querySelector('link[rel="next"], a[rel="next"], a.prev-next-list-link--next, [class*="next-page"]');
-                    if (relNext && relNext.href && !relNext.href.startsWith('javascript:') && !relNext.href.startsWith('#')) {
-                        nextUrl = relNext.href;
-                    }
-
-                    // Strategy 2: Pagination container selectors with next classes
-                    if (!nextUrl) {
-                        const nextSel = document.querySelector('.pagination .next a, .pagination a.next, a.next_page, a.next-page, a.pagination-next, .pagination-next a, .page-next a, li.page_next a, .page_next a, a#next_page, a.nextPage, [aria-label*="Next" i], [title*="Next page" i], [title*="Próxima" i]');
-                        if (nextSel) {
-                            if (nextSel.href && !nextSel.href.startsWith('javascript:') && !nextSel.href.startsWith('#')) {
-                                nextUrl = nextSel.href;
-                            } else if (window.location.host.includes('xvideos')) {
-                                const dataPage = nextSel.getAttribute('data-page');
-                                const targetPageNum = dataPage !== null ? (parseInt(dataPage, 10) + 1) : (curPageNum + 1);
-                                const base = window.location.href.split('#')[0];
-                                const hashPrefix = window.location.hash.includes('_tab') ? window.location.hash.split(',')[0] : '#_tabVideos';
-                                nextUrl = base + hashPrefix + ',page-' + targetPageNum;
-                            }
-                        }
-                    }
-
-                    // Strategy 3: Text content inspection of anchors
-                    if (!nextUrl) {
-                        for (const a of allLinks) {
-                            const txt = (a.innerText || '').trim().toLowerCase();
-                            const title = (a.getAttribute('title') || '').trim().toLowerCase();
-                            const aria = (a.getAttribute('aria-label') || '').trim().toLowerCase();
-                            const cls = (a.className || '').toString().toLowerCase();
-
-                            const isNextMatch = (
-                                txt === 'next' || txt === 'next »' || txt === 'next >' || txt === 'next ›' ||
-                                txt === '»' || txt === '›' || txt === 'próxima' || txt === 'proxima' ||
-                                txt === 'seguinte' || txt === 'suivante' || txt === 'weiter' ||
-                                title.includes('next page') || title.includes('próxima') || aria.includes('next page') ||
-                                cls.includes('pagination-next') || cls.includes('next-page')
-                            );
-
-                            if (isNextMatch && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
-                                nextUrl = a.href;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Strategy 4: Numbered pagination next link (e.g. curPageNum + 1)
-                    if (!nextUrl) {
-                        const nextPageNumStr = String(curPageNum + 1);
-                        for (const a of allLinks) {
-                            const txt = (a.innerText || '').trim();
-                            if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, [class*="pagination"], nav, ul, ol')) {
-                                if (a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
-                                    nextUrl = a.href;
-                                    break;
-                                } else if (window.location.host.includes('xvideos')) {
-                                    const base = window.location.href.split('#')[0];
-                                    const hashPrefix = window.location.hash.includes('_tab') ? window.location.hash.split(',')[0] : '#_tabVideos';
-                                    nextUrl = base + hashPrefix + ',page-' + (curPageNum + 1);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    return { items: items, nextUrl: nextUrl };
-                }""", page_count)
+                page_data = await _extract_scraper_page(page, page_count)
 
                 extracted_items = page_data.get("items", [])
                 new_items_this_page = 0
@@ -9734,334 +9820,7 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
                             scanned_items.append(hero_item)
 
                     # Extract page items and next link
-                    page_data = await page.evaluate(r"""(curPageNum) => {
-                        const items = [];
-                        const localSeenIds = new Set();
-
-                        function extractVideoId(href, a) {
-                            if (!href) return null;
-                            if (a && a.closest && a.closest('header, nav, #header, #headerWrapper, .language-select, .languageMenu, .headerMenu, footer, .footer')) return null;
-                            const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
-                            if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
-
-                            // xHamster pattern: /videos/title-slug-xhXXXXX or /movies/ID/slug.html
-                            const mXh = href.match(/xhamster\.[a-z.]+\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
-                                        href.match(/\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
-                                        href.match(/xhamster\.[a-z.]+\/movies\/([a-zA-Z0-9]+)/i);
-                            if (mXh && (href.includes('xhamster') || (mXh[1] && mXh[1].toLowerCase().startsWith('xh')))) {
-                                return 'xh_' + (mXh[1] || mXh[2]);
-                            }
-
-                            const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
-                            if (mEp) return 'ep_' + mEp[1];
-                            const mPh = href.match(/viewkey=([a-zA-Z0-9]+)/);
-                            if (mPh) return 'ph_' + mPh[1];
-                            if (href.includes('pornhub')) return null;
-                            if (href.includes('xvideos')) {
-                                const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
-                                if (mXvProf) return 'xv_' + mXvProf[1];
-                                const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//) || href.match(/\/video([a-zA-Z0-9]+)\//);
-                                if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
-                            } else {
-                                const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
-                                if (mXvProf) return 'xv_' + mXvProf[1];
-                                const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
-                                if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
-                            }
-                            const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
-                            if (mGen && mGen[1].toLowerCase() !== 's') return 'gen_' + mGen[1];
-                            return null;
-                        }
-
-                        function extractThumbnail(container) {
-                            if (!container) return '';
-                            const img = container.querySelector('img');
-                            if (img) {
-                                const src = img.getAttribute('data-src') ||
-                                            img.getAttribute('data-thumb_url') ||
-                                            img.getAttribute('data-mediumthumb') ||
-                                            img.getAttribute('data-lazy-src') ||
-                                            img.getAttribute('data-original') ||
-                                            img.getAttribute('data-thumb') ||
-                                            img.getAttribute('data-preview') ||
-                                            img.getAttribute('data-poster') ||
-                                            img.getAttribute('src');
-                                if (src && !src.startsWith('data:image/svg') && !src.includes('placeholder')) {
-                                    return src.startsWith('//') ? 'https:' + src : src;
-                                }
-                                if (img.srcset) {
-                                    const parts = img.srcset.split(',');
-                                    if (parts.length > 0) {
-                                        const first = parts[0].trim().split(' ')[0];
-                                        if (first) return first.startsWith('//') ? 'https:' + first : first;
-                                    }
-                                }
-                            }
-                            const bgEls = [container, ...(container.querySelectorAll ? container.querySelectorAll('*') : [])];
-                            for (const el of bgEls.slice(0, 8)) {
-                                const style = el.getAttribute ? (el.getAttribute('style') || '') : '';
-                                const mBg = style.match(/background-image:\s*url\(['"]?(https?:\/\/[^'")]+)['"]?\)/i);
-                                if (mBg) return mBg[1];
-                            }
-                            return '';
-                        }
-
-                        function isJunkTitle(t) {
-                            if (!t) return true;
-                            const clean = t.replace(/\s+/g, ' ').trim();
-                            if (!clean || clean.length < 2) return true;
-                            const junkRegex = /^(?:(?:\d{3,4}p|\d+k|hd|full\s*hd|sd|cc|fps|\d+:\d+|\d+\s*min(?:utes?)?|\d+\s*sec(?:onds?)?|new|vr|free)\s*)+$/i;
-                            if (junkRegex.test(clean)) return true;
-                            if (/^\d+$/.test(clean)) return true;
-                            const low = clean.toLowerCase();
-                            if (['play all', 'play all videos', 'reproduzir tudo', 'reproducir todo', 'tout lire'].includes(low)) return true;
-                            return false;
-                        }
-
-                        function extractTitleFromSlug(href) {
-                            if (!href) return '';
-                            try {
-                                const mXh = href.match(/\/videos\/(.+?)(?:-[a-zA-Z0-9]+)?(?:[?#]|$)/);
-                                if (mXh && mXh[1] && mXh[1].length > 3) {
-                                    let slug = mXh[1].replace(/-(?:xh[a-zA-Z0-9]+|\d+)$/i, '');
-                                    slug = slug.replace(/^[\-_]+|[\-_]+$/g, '');
-                                    let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
-                                    if (clean.length > 3 && !isJunkTitle(clean)) {
-                                        return clean.replace(/\b\w/g, c => c.toUpperCase());
-                                    }
-                                }
-                                const m = href.match(/\/video[0-9a-zA-Z._-]*\/([a-zA-Z0-9_\-\.%]+)/);
-                                if (m && m[1]) {
-                                    let slug = m[1].replace(/^[\-_]+|[\-_]+$/g, '');
-                                    slug = slug.replace(/\.[a-zA-Z0-9]{2,4}$/, '');
-                                    let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
-                                    if (clean.length > 3 && !isJunkTitle(clean)) {
-                                        return clean.replace(/\b\w/g, c => c.toUpperCase());
-                                    }
-                                }
-                            } catch (_) {}
-                            return '';
-                        }
-
-                        function cleanTitleText(t, cardEl) {
-                            if (!t) return '';
-                            let cleaned = t;
-                            if (cardEl) {
-                                const nestedDur = cardEl.querySelector('.mbtim, .duration, .time, .badge-duration');
-                                if (nestedDur && nestedDur.innerText) {
-                                    const durText = nestedDur.innerText.trim();
-                                    if (durText && cleaned.includes(durText)) {
-                                        cleaned = cleaned.replace(durText, ' ');
-                                    }
-                                }
-                            }
-                            cleaned = cleaned.replace(/\s+/g, ' ')
-                                             .replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '')
-                                             .replace(/^(?:1080p|720p|4k|hd|sd|cc)\s+/i, '')
-                                             .replace(/\s+(?:1080p|720p|4k|hd|sd|cc)$/i, '')
-                                             .trim();
-                            return cleaned;
-                        }
-
-                        const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                        const idMap = new Map();
-
-                        allLinks.forEach(a => {
-                            const rawId = extractVideoId(a.href, a);
-                            if (!rawId) return;
-
-                            if (!idMap.has(rawId)) {
-                                idMap.set(rawId, {
-                                    rawId: rawId,
-                                    anchors: [],
-                                    href: a.href,
-                                    card: null
-                                });
-                            }
-                            const entry = idMap.get(rawId);
-                            entry.anchors.push(a);
-
-                            if (!entry.card) {
-                                let cardCandidate = a.closest('.video-thumb, .thumb-list__item, .frame-block, .thumb-block, .video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, [id^="video_"], .video-card, li, td') || a.parentElement || a;
-                                if (cardCandidate && cardCandidate.classList && cardCandidate.classList.contains('thumb') && !cardCandidate.classList.contains('thumb-block')) {
-                                    const outer = cardCandidate.closest('.frame-block, .thumb-block, .video-box, .item-video, .video-item, article, [id^="video_"]');
-                                    if (outer) cardCandidate = outer;
-                                }
-                                entry.card = cardCandidate;
-                            }
-                        });
-
-                        idMap.forEach((entry, rawId) => {
-                            if (localSeenIds.has(rawId)) return;
-                            localSeenIds.add(rawId);
-
-                            const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
-                            const card = entry.card || (entry.anchors[0] ? entry.anchors[0].parentElement : null) || entry.anchors[0];
-                            const primaryA = entry.anchors[0];
-
-                            let thumb = '';
-                            if (card) thumb = extractThumbnail(card);
-                            if (!thumb) {
-                                for (const a of entry.anchors) {
-                                    thumb = extractThumbnail(a);
-                                    if (thumb) break;
-                                }
-                            }
-
-                            let title = '';
-
-                            for (const a of entry.anchors) {
-                                const aTitle = cleanTitleText(a.getAttribute('title') || '', a);
-                                if (aTitle && !isJunkTitle(aTitle)) {
-                                    title = aTitle;
-                                    break;
-                                }
-                                const imgAlt = cleanTitleText(a.querySelector('img')?.getAttribute('alt') || '', a);
-                                if (imgAlt && !isJunkTitle(imgAlt)) {
-                                    title = imgAlt;
-                                    break;
-                                }
-                            }
-
-                            if (!title && card) {
-                                const titleEl = card.querySelector('.video-thumb-info__name, [class*="thumb-info__name"], .title, .video-title, h3, h4, h2, .name');
-                                if (titleEl) {
-                                    const candidate = cleanTitleText(titleEl.getAttribute('title') || titleEl.innerText || '', titleEl);
-                                    if (!isJunkTitle(candidate)) {
-                                        title = candidate;
-                                    }
-                                }
-                            }
-
-                            if (!title) {
-                                for (const a of entry.anchors) {
-                                    const aImgTitle = cleanTitleText(a.querySelector('img')?.getAttribute('title') || '', a);
-                                    if (aImgTitle && !isJunkTitle(aImgTitle)) {
-                                        title = aImgTitle;
-                                        break;
-                                    }
-                                    const aText = cleanTitleText(a.innerText || '', a);
-                                    if (aText && !isJunkTitle(aText)) {
-                                        title = aText;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (!title) {
-                                for (const a of entry.anchors) {
-                                    const slugTitle = extractTitleFromSlug(a.href);
-                                    if (slugTitle && !isJunkTitle(slugTitle)) {
-                                        title = slugTitle;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            const durEl = card ? card.querySelector('.thumb-image-container__duration, [class*="thumb-image-container__duration"], .mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]') : null;
-                            const duration = durEl ? durEl.innerText.trim() : '';
-
-                            const qEl = card ? card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]') : null;
-                            let quality = qEl ? qEl.innerText.trim() : '';
-                            if (!quality) {
-                                for (const a of entry.anchors) {
-                                    const rawTxt = (a.innerText || '').trim();
-                                    const mQ = rawTxt.match(/(\d{3,4}p|4k|hd)/i);
-                                    if (mQ) {
-                                        quality = mQ[1].toUpperCase();
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!quality) quality = '1080p HD';
-
-                            const isPrimary = card ? (
-                                (
-                                    !!card.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list, .thumb-list, .pornstar-content__main, [class*="videoSection"], [class*="index-videos"], main, #main') ||
-                                    !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
-                                ) &&
-                                !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
-                            ) : true;
-                            const section = isPrimary ? 'main' : 'recommended';
-
-                            let finalUrl = primaryA ? primaryA.href : entry.href;
-                            const mXvProfRedirect = finalUrl.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)\/([a-zA-Z0-9_\-\.\%]+)/);
-                            if (mXvProfRedirect) {
-                                finalUrl = 'https://www.xvideos.com/video.' + mXvProfRedirect[1] + '/' + mXvProfRedirect[2];
-                            }
-                            if (finalUrl.includes('pornhub.com')) {
-                                const mPhClean = finalUrl.match(/viewkey=([a-zA-Z0-9]+)/);
-                                if (mPhClean) {
-                                    finalUrl = 'https://www.pornhub.com/view_video.php?viewkey=' + mPhClean[1];
-                                }
-                            }
-                            if (finalUrl.includes('xhamster')) {
-                                finalUrl = finalUrl.replace(/^https?:\/\/[a-z]{2,3}\.xhamster\./i, 'https://xhamster.');
-                            }
-                            items.push({
-                                id: cleanId,
-                                url: finalUrl,
-                                title: title || ('Vídeo ' + (items.length + 1)),
-                                thumbnail_url: thumb,
-                                duration: duration,
-                                quality_hint: quality,
-                                section: section,
-                                is_primary: isPrimary,
-                                page_found: curPageNum
-                            });
-                        });
-
-                        // Multi-strategy Next Page Detection
-                        let nextUrl = null;
-                        const relNext = document.querySelector('link[rel="next"], a[rel="next"], a.prev-next-list-link--next, [class*="next-page"]');
-                        if (relNext && relNext.href && !relNext.href.startsWith('javascript:') && !relNext.href.startsWith('#')) {
-                            nextUrl = relNext.href;
-                        }
-
-                        if (!nextUrl) {
-                            const nextSel = document.querySelector('.pagination .next a, .pagination a.next, a.next_page, a.next-page, a.pagination-next, .pagination-next a, .page-next a, li.page_next a, .page_next a, a#next_page, a.nextPage, [aria-label*="Next" i], [title*="Next page" i], [title*="Próxima" i]');
-                            if (nextSel && nextSel.href && !nextSel.href.startsWith('javascript:') && !nextSel.href.startsWith('#')) {
-                                nextUrl = nextSel.href;
-                            }
-                        }
-
-                        if (!nextUrl) {
-                            for (const a of allLinks) {
-                                const txt = (a.innerText || '').trim().toLowerCase();
-                                const title = (a.getAttribute('title') || '').trim().toLowerCase();
-                                const aria = (a.getAttribute('aria-label') || '').trim().toLowerCase();
-                                const cls = (a.className || '').toString().toLowerCase();
-
-                                const isNextMatch = (
-                                    txt === 'next' || txt === 'next »' || txt === 'next >' || txt === 'next ›' ||
-                                    txt === '»' || txt === '›' || txt === 'próxima' || txt === 'proxima' ||
-                                    txt === 'seguinte' || txt === 'suivante' || txt === 'weiter' ||
-                                    title.includes('next page') || title.includes('próxima') || aria.includes('next page') ||
-                                    cls.includes('pagination-next') || cls.includes('next-page')
-                                );
-
-                                if (isNextMatch && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
-                                    nextUrl = a.href;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (!nextUrl) {
-                            const nextPageNumStr = String(curPageNum + 1);
-                            for (const a of allLinks) {
-                                const txt = (a.innerText || '').trim();
-                                if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, [class*="pagination"], nav, ul, ol')) {
-                                    if (a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
-                                        nextUrl = a.href;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        return { items: items, nextUrl: nextUrl };
-                    }""", page_count)
+                    page_data = await _extract_scraper_page(page, page_count)
 
                     extracted_items = page_data.get("items", [])
                     new_this_page = []
@@ -11884,6 +11643,10 @@ from .profile_directory_service import router as profile_directory_router
 app.include_router(profile_directory_router)
 from .profile_hub_library import router as profile_hub_library_router
 app.include_router(profile_hub_library_router)
+from .social_timeline import SocialTimeline, social_timeline_router
+app.include_router(social_timeline_router(SocialTimeline()))
+from .timeline_omni_service import router as timeline_omni_router
+app.include_router(timeline_omni_router)
 
 
 # ---------------------------------------------------------------------------
@@ -12482,11 +12245,10 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
         img.poster_url = fresh_thumb
 
     formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
-    is_pornhub = "pornhub.com" in (target_url or "").lower()
-    if is_pornhub:
-        # For Pornhub, hv-h CDN streams (HLS format_ids) bypass rigid client-IP bindings (&ipa=1)
-        # and reliably deliver HTTP 206 partial content without 474 Unauthorized errors
-        hls_mp4s = [f for f in formats if str(f.get("format_id", "")).startswith("hls") or "hv-h.phncdn.com" in str(f.get("url", ""))]
+    is_ip_bound_hls = "viewkey=" in (target_url or "").lower() or any("&ipa=" in str(f.get("url", "")) for f in formats)
+    if is_ip_bound_hls:
+        # Prefer HLS format_ids when progressive streams carry rigid client-IP bindings (&ipa=1)
+        hls_mp4s = [f for f in formats if str(f.get("format_id", "")).startswith("hls")]
         direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
         pool = hls_mp4s if hls_mp4s else (direct_mp4s if direct_mp4s else formats)
     else:

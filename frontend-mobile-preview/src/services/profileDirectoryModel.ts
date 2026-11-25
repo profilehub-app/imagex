@@ -105,32 +105,30 @@ export function projectDirectory(session: DirectorySession, language: string, lo
 
 /** Use the adapter's first-page URL; UI never edits source route segments. */
 export function directoryFilterUrl(page: DirectoryPage, values: Record<string, string[]>, categoryUrl?: string) {
-  if (page.adapter_id === 'xhamster') {
-    let baseUrl = categoryUrl;
-    if (!baseUrl) {
-      const country = values['country']?.[0];
-      const format = values['format']?.[0];
-      const section = values['section']?.[0];
-      if (country) {
-        baseUrl = page.capabilities.category_links[`country_${country}`] || `https://xhamster.com/pornstars/all/countries/${country}`;
-      } else if (format === '4k') {
-        baseUrl = page.capabilities.category_links['format_4k'] || 'https://xhamster.com/pornstars/all/4k';
-      } else if (format === 'vr') {
-        baseUrl = page.capabilities.category_links['format_vr'] || 'https://xhamster.com/pornstars/all/vr';
-      } else if (section && page.capabilities.category_links[section]) {
-        baseUrl = page.capabilities.category_links[section];
+  const links = page.capabilities.category_links || {};
+  const country = values['country']?.[0];
+  const format = values['format']?.[0];
+  const section = values['section']?.[0];
+  if (
+    !categoryUrl &&
+    (links[`country_${country}`] || links[`format_${format}`] || (section && links[section]))
+  ) {
+    const resolvedBase =
+      (country && links[`country_${country}`]) ||
+      (format && links[`format_${format}`]) ||
+      (section && links[section]) ||
+      page.capabilities.all_url ||
+      page.capabilities.query_url;
+    if (resolvedBase) {
+      const url = new URL(resolvedBase);
+      const gender = values['gender']?.[0];
+      if (gender) {
+        url.searchParams.set('gender', gender);
       } else {
-        baseUrl = page.capabilities.all_url || 'https://xhamster.com/pornstars';
+        url.searchParams.delete('gender');
       }
+      return url.toString();
     }
-    const url = new URL(baseUrl);
-    const gender = values['gender']?.[0];
-    if (gender) {
-      url.searchParams.set('gender', gender);
-    } else {
-      url.searchParams.delete('gender');
-    }
-    return url.toString();
   }
 
   const base = categoryUrl || page.capabilities.query_url;

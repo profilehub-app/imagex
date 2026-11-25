@@ -32,6 +32,7 @@ export const SourceAvatar: React.FC<SourceAvatarProps> = ({
   ...rest
 }) => {
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const rehydratedRef = useRef<string | null>(null);
   const [inView, setInView] = useState(hydrate);
   const requestAvatar = useProfileAvatarStore((state) => state.requestAvatar);
   const safeInline = safeAvatarSourceUrl(src);
@@ -86,6 +87,10 @@ export const SourceAvatar: React.FC<SourceAvatarProps> = ({
       data-avatar-status={resolved.status}
       className={`${className}${disableMotion ? '' : ' transition-opacity duration-200'}`}
       onError={(event) => {
+        if (safeProfile && rehydratedRef.current !== safeProfile) {
+          rehydratedRef.current = safeProfile;
+          void requestAvatar(safeProfile);
+        }
         handleProxiedImageError(event, {
           rawUrl: activeRemoteSrc,
           referer: referer || safeProfile || activeRemoteSrc,

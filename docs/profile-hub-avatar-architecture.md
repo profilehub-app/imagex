@@ -1,12 +1,12 @@
 # Profile Hub — Unified Avatar & Extensible Provider Architecture
 
-This document records the permanent 5-layer architecture, invariants, and anti-regression guardrails for resolving profile, creator, channel, participating artist, and source-commenter avatars across built-in providers (`youtube`, `eporner`, `pornhub`, `xhamster`) and arbitrary future sources.
+This document describes how Profile Hub resolves avatars for profiles and commenters across available connectors.
 
 ## Why This Pipeline Exists
 
 Watch pages and comment feeds across heterogeneous platforms frequently:
-- omit `<img>` avatars inline from the watch HTML or comment payload (for example, channel pages using CSS `background-image`, Eporner uploader links without inline thumbnails, Pornhub model/performer pages, or paginated comments with `author_url` only);
-- exceed small 512 KiB HTML prefix limits before structured avatar metadata or DOM headers appear (Pornhub places `#getAvatar`/`.thumbImage` around ~535 KiB; YouTube puts ~845 KiB of inline `<head>` styles/scripts before `<link rel="image_src">`, `<meta property="og:image">`, and `ytInitialData`);
+- omit avatar images from the page or comment payload, expose an image in CSS, or provide only an author link;
+- put profile metadata beyond the first 512 KiB of HTML;
 - return HTTP 401/403 or `200 OK` HTML/challenge/placeholder responses from CDNs when requested directly by the browser without proper `Referer`/headers, or serve tiny (<1 KiB) legitimate raster images that naive size thresholds would falsely reject.
 
 To guarantee every profile surface renders reliably without scattering brittle site checks, **do not bypass or inline-replace any layer below**.
@@ -28,7 +28,7 @@ To guarantee every profile surface renders reliably without scattering brittle s
 - **Contract:** `ProfileProviderSpec`, `GENERIC_PROVIDER`, `register_provider()`, `unregister_provider()`, `resolve_provider()`, `canonicalize_profile_url()`, `normalize_source_author_url()`.
 - **How to add a new site/source:** Register a `ProfileProviderSpec` declaration (domains, suffix/prefix matchers, `profile_path_patterns`, `avatar_selectors`, `avatar_bg_selectors`, `confirmed_no_avatar_selectors`, `max_html_bytes`). Do **not** scatter per-site `if/elif` domain branches across UI components, `TimelineWatchView`, `SourceComments`, or batch resolvers.
 - **Invariants:**
-  - `ProfileProviderSpec.max_html_bytes` defaults to `1536 * 1024` (1.5 MiB), and `youtube`/`pornhub` use `2 * 1024 * 1024` (2 MiB). Never reduce this back to `512 KiB`, or Pornhub (`#getAvatar` at ~535 KB) and YouTube (`link[rel='image_src']`/`og:image` at ~845 KB) will truncate before their avatar metadata!
+  - The default HTML limit is 1.5 MiB. Adapters may raise it to 2 MiB when required to reach profile metadata.
   - `normalize_source_author_url` restricts commenter/creator URLs to safe HTTPS routes on the owning provider (blocking `javascript:`, credentials, search/watch routes, and cross-site injection).
 
 ### 3. Unified SSRF-Safe Batch Avatar Resolver Service
@@ -47,13 +47,13 @@ To guarantee every profile surface renders reliably without scattering brittle s
 - **Owners:** `src/server/profile_hub_avatar_extractors.py`, `src/server/profile_hub_workers.py`.
 - **Cascade (`extract_structured_profile_avatar`):**
   1. `looks_like_challenge_page` -> returns `(None, False)` so error isn't negative-cached.
-  2. Provider `confirmed_no_avatar_selectors` (e.g., `.pf-avatar .pf-letter`, `img#getAvatar[src*='/users/default/']`) -> `(None, True)`.
+  2. Provider `confirmed_no_avatar_selectors` establishes confirmed absence.
   3. Provider `avatar_selectors` & `avatar_bg_selectors` using shared `_extract_node_image` (`link[href]`, `meta[content]`, `<picture><source srcset>`, `data-src`/`data-lazy-src`/`data-original`, CSS `background-image`).
   4. JSON-LD entity metadata (`Person`, `ProfilePage`, `Organization`, etc.).
   5. Universal `_DEFAULT_AVATAR_SELECTORS` & `_DEFAULT_BG_SELECTORS`.
-  6. Embedded JS state (`window.initials`, `ytInitialData`, `pageHeaderViewModel`, `avatarUrl`, `thumbURL`, etc.).
-  7. Scoped `og:image` / `twitter:image`.
-- **Anti-Logo Guard (`is_generic_site_asset`):** Blocks sitewide logos (`oglogo`, `youtube_logo`, `yt_1200`), placeholders (`default-avatar`, `/users/default/`, `/default/pornhub/`, `noavatar`, `avatar-placeholder`), and video thumbnails (`/thumbs/`, `/thumb/`) so real avatars never get replaced by generic site icons or user silhouettes. Note: performer portrait paths like `/thumb_1173801.jpg` and cache-busted `.v<ts>` channel filenames like `logo.jpg.v1533717764` are deliberately preserved.
+  6. Embedded state carrying structured avatar URLs.
+  7. Scoped image metadata such as `og:image`.
+- **Anti-Logo Guard (`is_generic_site_asset`):** Excludes sitewide logos, generic placeholders and unrelated thumbnails while preserving portrait images.
 
 ### 5. Unified Frontend Store & `<SourceAvatar />` Component
 - **Owners:**
@@ -64,6 +64,6 @@ To guarantee every profile surface renders reliably without scattering brittle s
   - Integrated in: `TimelineWatchView.tsx`, `WatchArtistsRow.tsx`, `SourceComments.tsx`, `ProfileHubLibraryView.tsx`, `ProfileDirectoryPanel.tsx`, `TimelineStoriesBar.tsx`, `AdaptiveProfileHeader.tsx`, `TimelinePostCard.tsx`.
 - **Invariants:**
   - All Profile Hub avatar surfaces MUST render `<SourceAvatar />` (not bare `<img>` tags), which enforces `safeAvatarSourceUrl`, batched debounced hydration via `useProfileAvatarStore`, `/api/proxy-image` error recovery with `referer`, and monogram initials fallback (`getInitialsAvatar`).
-  - `avatarIdentityKey` (stripping `www.`/`m.` and trailing `/`, preserving path case for case-sensitive YouTube `UC...` IDs) is intentionally separate from `profileShortcutIdentity` (which keeps `www.` for persisted favorites compatibility). Do not merge or break either normalizer.
+  - `avatarIdentityKey` normalizes host prefixes and trailing slashes while preserving case-sensitive path identifiers. `profileShortcutIdentity` retains the host for compatibility with saved favorites.
   - Comment lists use `lazyHydrate` (`IntersectionObserver`) so offscreen commenters do not trigger unnecessary backend bursts.
   - When `TimelineWatchView` resolves an improved `resolvedCreatorAvatar`, History updates MUST use `{ enrichOnly: true }` so `watchedAt` order is preserved.

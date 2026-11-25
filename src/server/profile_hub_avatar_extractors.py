@@ -39,7 +39,7 @@ _GENERIC_ASSET_MARKERS = (
     "default-avatar",
     "default_avatar",
     "/users/default/",
-    "/default/pornhub/",
+    "/default/avatar/",
     "noavatar",
     "no-avatar",
     "avatar-placeholder",
@@ -357,7 +357,7 @@ def extract_structured_profile_avatar(
     if not has_document_structure:
         return None, False
 
-    # 1) Provider-specific confirmed avatarless sentinels (e.g. .pf-avatar .pf-letter on Eporner)
+    # 1) Provider-specific confirmed avatarless sentinels (e.g. .pf-avatar .pf-letter)
     no_avatar_guards = list(getattr(provider_spec, "confirmed_no_avatar_selectors", ()) or ()) + list(_DEFAULT_NO_AVATAR_GUARDS)
     for entry in no_avatar_guards:
         if isinstance(entry, tuple) and len(entry) == 2:

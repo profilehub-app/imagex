@@ -154,9 +154,9 @@ def test_matches_video_id_in_cdn():
 
 
 def test_suggest_smart_folder_name():
-    url = "https://example.com/artist/abigail-morris-sample"
-    folder = suggest_smart_folder_name(url, "Abigail Morris Videos")
-    assert folder == "Abigail Morris"
+    url = "https://catalog.example/artist/avery-lane-a123"
+    folder = suggest_smart_folder_name(url, "Avery Lane Videos")
+    assert folder == "Avery Lane"
 
     url2 = "https://example.com/actor/john-doe-1234"
     folder2 = suggest_smart_folder_name(url2)

@@ -1,0 +1,365 @@
+{
+  "catalogs": [
+    {
+      "id": "catalog_example",
+      "displayName": "Gallery Catalog",
+      "baseUrl": "https://catalog.example",
+      "domains": [
+        "catalog.example"
+      ],
+      "iconKind": "gallery_catalog",
+      "rootMode": "api_list",
+      "catalogModes": [
+        "popular",
+        "recent",
+        "albums",
+        "gifs"
+      ],
+      "defaultCategory": "popular",
+      "searchCategories": [
+        "all",
+        "profiles",
+        "albums",
+        "gifs"
+      ],
+      "capabilities": {
+        "archetype": "gallery_catalog",
+        "layoutMode": "editorial_wall",
+        "supportsComments": false,
+        "supportsSourceLikes": false,
+        "supportsVideosTab": false,
+        "supportsPlaylists": false,
+        "supportsArtistProfiles": true,
+        "supportsDirectories": true,
+        "directoryKinds": [
+          "categories",
+          "artists",
+          "channels",
+          "tags"
+        ]
+      },
+      "browse": {
+        "apiListPath": "/api/albums",
+        "searchApiPath": "/api/search",
+        "rankingSubpaths": [
+          "rating",
+          "views",
+          "likes"
+        ],
+        "directories": {
+          "categories": "/",
+          "artists": "/artists/",
+          "channels": "/channels/",
+          "tags": "/tags/"
+        },
+        "thumbUpgrade": [
+          "/preview/",
+          "/original/"
+        ]
+      }
+    }
+  ],
+  "forums": [
+    {
+      "id": "forum_example",
+      "displayName": "Media Board",
+      "baseUrl": "https://board.example",
+      "domains": [
+        "board.example"
+      ],
+      "iconKind": "forum_board",
+      "catalogModes": [
+        "albums",
+        "videos",
+        "gifs",
+        "posts",
+        "recent"
+      ],
+      "defaultCategory": "albums",
+      "searchCategories": [
+        "all",
+        "profiles",
+        "albums",
+        "videos",
+        "gifs",
+        "posts"
+      ],
+      "capabilities": {
+        "archetype": "forum_board",
+        "layoutMode": "forum_index",
+        "supportsComments": false,
+        "supportsSourceLikes": false,
+        "supportsVideosTab": false,
+        "supportsPlaylists": false,
+        "supportsArtistProfiles": true,
+        "supportsDirectories": true,
+        "supportsThreadReader": true,
+        "directoryKinds": [
+          "boards"
+        ]
+      },
+      "forum": {
+        "indexPath": "/boards",
+        "searchPath": "/search",
+        "searchProcessPath": "/search/results",
+        "coalesceTitleSearch": true,
+        "defaultSearchFlags": {
+          "threadtitleonly": "1"
+        },
+        "excludedBoardIds": [],
+        "excludedTitleRegex": "",
+        "boardRoles": {
+          "album_sets": [
+            "10"
+          ],
+          "artist_collections": [
+            "20"
+          ],
+          "video_releases": [
+            "30"
+          ],
+          "gif_boards": [
+            "40"
+          ],
+          "link_drops": [
+            "50"
+          ]
+        }
+      }
+    }
+  ],
+  "videoPortals": [
+    {
+      "id": "vid_portal_example",
+      "displayName": "Video Portal",
+      "domains": [
+        "portal.example",
+        "m.portal.example"
+      ],
+      "canonicalOrigin": "https://portal.example",
+      "accentColor": "#e11d48",
+      "enabled": true,
+      "iconKind": "video_portal",
+      "catalogModes": [
+        "videos",
+        "popular",
+        "recent",
+        "shorts",
+        "playlists"
+      ],
+      "defaultCategory": "recent",
+      "searchCategories": [
+        "all",
+        "profiles",
+        "videos",
+        "playlists"
+      ],
+      "capabilities": {
+        "archetype": "video_portal",
+        "layoutMode": "video_wall",
+        "supportsComments": true,
+        "supportsSourceLikes": true,
+        "supportsNativePlayback": true,
+        "supportsVideosTab": true,
+        "supportsPlaylists": true,
+        "supportsArtistProfiles": true,
+        "supportsDirectories": true,
+        "supportsThreadReader": false,
+        "directoryKinds": [
+          "categories",
+          "channels",
+          "artists",
+          "tags"
+        ]
+      },
+      "scraper": {
+        "profileRootPathRegex": "^/creators/[a-z0-9_-]+/?$",
+        "initialHash": "#clips",
+        "idPathRegexes": [
+          "^/out/([a-z0-9]+)/",
+          "^/clips/([a-z0-9]+)/"
+        ],
+        "canonicalLink": {
+          "pathRegex": "^/out/([a-z0-9]+)/([a-z0-9-]+)$",
+          "pathTemplate": "/clips/$1/$2"
+        },
+        "pagination": {
+          "hashPrefix": "#clips",
+          "existingHashPrefix": "#clips",
+          "pageSuffix": ",page-",
+          "pageOffset": 1
+        }
+      },
+      "urlHints": {
+        "videoPathRegex": "^/(?:videos|player)/[a-z0-9-]+",
+        "playlistPathRegex": "^/collections/[a-z0-9-]+",
+        "entityPrefixes": [
+          "/creators/",
+          "/channels/",
+          "/topics/",
+          "/tags/"
+        ]
+      },
+      "routing": {
+        "mobileSubdomains": [
+          "m",
+          "mobile"
+        ],
+        "stripPrefixes": [
+          "/amp/"
+        ],
+        "redirectRules": [
+          {
+            "pattern": "^/open/([a-z0-9-]+)$",
+            "template": "/videos/\\1"
+          }
+        ],
+        "videoIdRegex": "/(?:videos|player)/([a-z0-9-]+)",
+        "videoPathPrefixes": [
+          "/videos/",
+          "/player/"
+        ],
+        "playlistPrefixes": [
+          "/collections/"
+        ],
+        "categoryPrefixes": [
+          "/topics/"
+        ],
+        "tagPrefixes": [
+          "/tags/"
+        ],
+        "channelPrefixes": [
+          "/channels/"
+        ],
+        "creatorPrefixes": [
+          "/creators/"
+        ],
+        "directoryPrefixes": [
+          "/topics",
+          "/channels",
+          "/creators",
+          "/tags"
+        ],
+        "reservedRootPrefixes": [
+          "/latest",
+          "/popular",
+          "/videos",
+          "/player",
+          "/tags",
+          "/topics",
+          "/channels",
+          "/creators",
+          "/collections",
+          "/search"
+        ],
+        "rootSlugEntityKind": "channel",
+        "rootSlugRegex": "^/([A-Za-z0-9_.-]{2,})(?:/.*)?$",
+        "stripTrailingTabs": [
+          "videos",
+          "photos",
+          "playlists",
+          "favorites",
+          "best",
+          "new",
+          "shorts"
+        ]
+      },
+      "videoCards": {
+        "cardSelector": "div.portal-grid div.portal-card:not(.portal-dir-card)",
+        "videoIdAttr": "data-id",
+        "videoEidAttr": "data-eid",
+        "titleLinkSelector": "p.title a",
+        "thumbSelector": "img",
+        "thumbSrcAttrs": [
+          "data-src",
+          "src"
+        ],
+        "previewVideoAttrs": [
+          "data-preview",
+          "data-mediabook"
+        ],
+        "durationSelector": "span.duration",
+        "qualitySelector": "span.quality-badge",
+        "authorLinkSelector": "p.metadata a",
+        "authorNameSelector": "span.name",
+        "viewsSelector": "p.metadata",
+        "viewsRegex": "([0-9]+(?:\\.[0-9]+)?\\s*[KkMm]?\\s*Views?)",
+        "paginationSelector": ".pagination a",
+        "pageHrefRegex": "(?:/([0-9]+)|[?&]p=([0-9]+))(?:$|[?#])",
+        "pageBaseZero": true
+      },
+      "profile": {
+        "confRegex": "portal\\.conf\\s*=\\s*(\\{.*?\\});",
+        "nameSelectors": [
+          ".portal-title .name",
+          ".portal-title",
+          "h2.page-title"
+        ],
+        "avatarSelectors": [
+          ".portal-avatar img",
+          "meta[property='og:image']"
+        ],
+        "bannerSelectors": [
+          ".portal-banner img"
+        ],
+        "bioSelectors": [
+          ".portal-bio",
+          ".portal-about p"
+        ],
+        "statsContainerSelector": ".portal-about",
+        "subscribersRegex": "Subscribers:\\s*([0-9,.\\sKkMm]+)",
+        "totalViewsRegex": "Total video views:\\s*([0-9,.\\sKkMm]+)",
+        "relatedLinksSelector": ".portal-about a[href]",
+        "videosJsonPathTemplate": "{entity_base}/videos/{sort}/{page_zero}",
+        "shortsJsonPathTemplate": "{entity_base}/shorts/{sort}/{page_zero}",
+        "videosJsonKey": "videos",
+        "totalVideosKey": "total",
+        "perPageKey": "pageSize",
+        "pageBaseZero": true
+      },
+      "watch": {
+        "jsonLdSelector": "script[type='application/ld+json']",
+        "titleSelector": "h2.page-title",
+        "uploaderLinkSelector": ".portal-metadata li.portal-uploader a",
+        "performerLinkSelector": ".portal-metadata li.portal-performer a",
+        "tagSelector": "a.portal-tag, a[href^='/tags/']",
+        "categorySelector": "a[href^='/topics/']",
+        "likesSelector": "span.portal-likes",
+        "dislikesSelector": "span.portal-dislikes",
+        "commentsCountSelector": "button.comments .badge",
+        "numericIdRegex": "\"videoId\"\\s*:\\s*(\\d+)",
+        "relatedVarRegex": "var\\s+portal_related\\s*=\\s*(\\[.*?\\]);"
+      },
+      "comments": {
+        "listPathTemplate": "/api/videos/{numeric_id}/comments?page={page_zero}",
+        "pageBaseZero": true
+      },
+      "browse": {
+        "feeds": {
+          "latest": "/latest?page={page_zero}",
+          "popular": "/popular?page={page_zero}",
+          "verified": "/featured?page={page_zero}"
+        },
+        "dynamicSubfilters": {
+          "selector": "nav[aria-label='Topics'] a[href^='/topics/']",
+          "maxItems": 14
+        },
+        "pageBaseZero": true,
+        "directories": {}
+      },
+      "search": {
+        "videosPathTemplate": "/search?query={query}&page={page_zero}",
+        "suggestPathTemplate": "/api/suggestions?query={query}",
+        "pageBaseZero": true
+      },
+      "streamFallback": {
+        "hlsRegex": "portalPlayer\\.setHLS\\(['\"]([^'\"]+)['\"]\\)",
+        "hdMp4Regex": "portalPlayer\\.setHD\\(['\"]([^'\"]+)['\"]\\)",
+        "sdMp4Regex": "portalPlayer\\.setSD\\(['\"]([^'\"]+)['\"]\\)",
+        "thumbRegex": "portalPlayer\\.setPoster\\(['\"]([^'\"]+)['\"]\\)",
+        "titleRegex": "portalPlayer\\.setTitle\\(['\"]([^'\"]+)['\"]\\)"
+      }
+    }
+  ],
+  "imageHosts": []
+}

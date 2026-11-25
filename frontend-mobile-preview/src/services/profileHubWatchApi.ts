@@ -1,10 +1,13 @@
 import { engagementSourceUrl } from './profileHubEngagement';
 import { parseProfileHubCommentsResponse, SourceTimelineComment } from './profileHubComments';
 
+export type WatchCommentSort = 'popular' | 'newest';
 export interface WatchComment extends SourceTimelineComment { id: string; parent: string; reply_count: number | null; reply_context_available?: boolean; }
 export interface WatchCommentsPage {
   status: 'ready' | 'unsupported' | 'disabled'; source_url: string;
   entries: WatchComment[]; reported_total: number | null; complete: boolean; next_cursor: string | null;
+  sort?: WatchCommentSort | null;
+  supported_sorts?: WatchCommentSort[];
 }
 export type WatchArtistRole = 'performer' | 'creator' | 'channel' | null;
 export interface WatchVideoArtist {
@@ -14,11 +17,19 @@ export interface WatchVideoArtist {
   role: WatchArtistRole;
   verified: boolean;
 }
+export interface WatchTagOrCategoryRef {
+  name: string;
+  url: string;
+}
 export interface WatchVideoDetails {
   status: 'ready' | 'unsupported'; source_url: string;
   title: string | null; description: string | null; author_name: string | null; author_url: string | null;
   author_avatar_url: string | null; audience_count_text: string | null; audience_kind: 'subscribers' | 'followers' | null;
   artists: WatchVideoArtist[];
+  tags?: WatchTagOrCategoryRef[];
+  categories?: WatchTagOrCategoryRef[];
+  upload_date?: string | null;
+  view_count_text?: string | null;
   reaction_kind: 'like_dislike' | 'heart' | 'like' | null;
   like_count: number | null; dislike_count: number | null; comment_count: number | null;
 }
@@ -81,15 +92,32 @@ export async function fetchWatchVideoDetails(url: string, signal: AbortSignal): 
   const audience_kind = data.audience_kind ?? null;
   if (![null, 'subscribers', 'followers'].includes(audience_kind as null) || Boolean(audience_count_text) !== Boolean(audience_kind)) throw new Error('Invalid source audience label');
   const artists = parseWatchArtists(data.artists);
+  const parseRefList = (rawList: unknown): WatchTagOrCategoryRef[] => {
+    if (!Array.isArray(rawList)) return [];
+    const out: WatchTagOrCategoryRef[] = [];
+    for (const row of rawList) {
+      if (!row || typeof row !== 'object') continue;
+      const r = row as Record<string, unknown>;
+      const name = typeof r.name === 'string' ? r.name.replace(/\s+/g, ' ').trim() : '';
+      const refUrl = engagementSourceUrl(r.url);
+      if (name && refUrl) out.push({ name, url: refUrl });
+    }
+    return out;
+  };
   return {status: data.status as WatchVideoDetails['status'], source_url: String(data.source_url),
     title: optionalText(data.title), description: optionalText(data.description), author_name: optionalText(data.author_name), author_url,
     author_avatar_url, audience_count_text, audience_kind: audience_kind as WatchVideoDetails['audience_kind'], artists,
+    tags: parseRefList(data.tags),
+    categories: parseRefList(data.categories),
+    upload_date: data.upload_date !== undefined ? optionalText(data.upload_date) : null,
+    view_count_text: data.view_count_text !== undefined ? optionalText(data.view_count_text) : null,
     reaction_kind: data.reaction_kind as WatchVideoDetails['reaction_kind'], like_count: count(data.like_count), dislike_count: count(data.dislike_count), comment_count: count(data.comment_count)};
 }
-export async function fetchWatchCommentsPage(url: string, signal: AbortSignal, cursor?: string, parentId?: string): Promise<WatchCommentsPage> {
+export async function fetchWatchCommentsPage(url: string, signal: AbortSignal, cursor?: string, parentId?: string, sort?: WatchCommentSort): Promise<WatchCommentsPage> {
   const extra: Record<string,string> = {};
   if (cursor) extra.cursor = cursor;
   if (parentId) extra.parent_id = parentId;
+  if (sort && !cursor && !parentId) extra.sort = sort;
   const data = await request('/api/profile-hub/comments-page', url, signal, extra);
   if (!Array.isArray(data.entries) || typeof data.complete !== 'boolean' || (data.next_cursor !== null && (typeof data.next_cursor !== 'string' || !data.next_cursor.length))) throw new Error('Invalid comment page');
   // Legacy /comments rejects unconfirmed emptiness. Cursor pages may legitimately
@@ -104,5 +132,10 @@ export async function fetchWatchCommentsPage(url: string, signal: AbortSignal, c
     return {...entry, id: entry.id, parent: entry.parent, reply_count: count(raw.reply_count ?? null), reply_context_available:raw.reply_context_available as boolean | undefined};
   });
   if (data.complete && data.next_cursor !== null) throw new Error('Complete page has cursor');
-  return {...parsed, entries, complete:data.complete, next_cursor: data.next_cursor as string | null};
+  const rawSort = data.sort;
+  const resolvedSort: WatchCommentSort | null = rawSort === 'popular' || rawSort === 'newest' ? rawSort : null;
+  const supported_sorts: WatchCommentSort[] = Array.isArray(data.supported_sorts)
+    ? data.supported_sorts.filter((item): item is WatchCommentSort => item === 'popular' || item === 'newest')
+    : [];
+  return {...parsed, entries, complete:data.complete, next_cursor: data.next_cursor as string | null, sort: resolvedSort, supported_sorts};
 }

@@ -1,3 +1,5 @@
+import { version as appVersion } from '../../package.json';
+import { getCommunityConfig } from './communityConfig';
 
 export interface UpdateCheckResponse {
   update_available: boolean;
@@ -2138,14 +2140,14 @@ export class BackendApiClient {
       if (!res.ok) {
         return {
           update_available: false,
-          current_version: '5.5.0',
-          latest_version: '5.5.0',
+          current_version: appVersion,
+          latest_version: appVersion,
           release_name: '',
           release_notes: '',
           published_at: '',
           html_url: '',
           is_git_repo: true,
-          repository: 'jardieljw/album-agent',
+          repository: getCommunityConfig().githubRepo,
           checked_at: Date.now() / 1000,
           error: `HTTP ${res.status}`
         };
@@ -2154,14 +2156,14 @@ export class BackendApiClient {
     } catch (err: any) {
       return {
         update_available: false,
-        current_version: '5.5.0',
-        latest_version: '5.5.0',
+        current_version: appVersion,
+        latest_version: appVersion,
         release_name: '',
         release_notes: '',
         published_at: '',
         html_url: '',
         is_git_repo: true,
-        repository: 'jardieljw/album-agent',
+        repository: getCommunityConfig().githubRepo,
         checked_at: Date.now() / 1000,
         error: err.message || String(err)
       };

@@ -12,9 +12,12 @@ from .profile_hub_execution import ExecutionError, https_url
 from .profile_hub_workers import is_youtube_channel_url
 
 
-class EpornerExecutionSource:
-    id = 'eporner'
-    hosts = {'eporner.com', 'www.eporner.com'}
+class PortalGridExecutionSource:
+    id = 'portal_grid'
+
+    def _matches_host(self, url):
+        parts = urlsplit(https_url(url))
+        return bool(parts.hostname)
 
     def collection_identity(self, url):
         path = urlsplit(url).path
@@ -38,10 +41,10 @@ class EpornerExecutionSource:
         parts = urlsplit(https_url(item['url']))
         if item['kind'] in ('photo', 'gif'):
             return
-        if parts.hostname not in self.hosts or parts.query:
+        if not parts.hostname or parts.query:
             raise ExecutionError('unsupported_media_route')
         if item['kind'] == 'video':
-            valid = re.fullmatch(r'/(?:hd-porn/[A-Za-z0-9]+|video-[A-Za-z0-9]+)(?:/[^/?#]+)*/?', parts.path)
+            valid = re.fullmatch(r'/(?:hd-video/[A-Za-z0-9]+|video-[A-Za-z0-9]+)(?:/[^/?#]+)*/?', parts.path)
         else:
             identity = self.collection_identity(item['url'])
             valid = identity[0] == 'playlist' if item['kind'] == 'playlist' else identity[0] in ('gallery', 'photo')
@@ -53,16 +56,17 @@ class EpornerExecutionSource:
         self.validate_item({'kind': kind, 'url': source_url})
         source = self
         identity = self.collection_identity(source_url)
+        origin_host = (urlsplit(https_url(source_url)).hostname or '').lower()
 
         class Context:
             def normalize_url(self, value):
                 parts = urlsplit(https_url(value))
-                if parts.hostname not in source.hosts or source.collection_identity(value) != identity:
+                if (parts.hostname or '').lower() != origin_host or source.collection_identity(value) != identity:
                     raise ValueError('collection_context_changed')
                 pairs = parse_qsl(parts.query, keep_blank_values=True)
                 if any(key != 'page' or not re.fullmatch('[1-9][0-9]{0,4}', val) for key, val in pairs) or len(pairs) > 1:
                     raise ValueError('unsupported_collection_query')
-                return urlunsplit(('https', 'www.eporner.com', parts.path.rstrip('/') + '/', parts.query, ''))
+                return urlunsplit(('https', origin_host, parts.path.rstrip('/') + '/', parts.query, ''))
 
         context = Context()
         pending = [context.normalize_url(source_url)]
@@ -190,7 +194,7 @@ class YouTubeExecutionSource:
 class ExecutionSources:
     """Installing another adapter does not change the frontend/execution contract."""
     def __init__(self, adapters=None):
-        self.adapters = adapters or [EpornerExecutionSource(), YouTubeExecutionSource()]
+        self.adapters = adapters or [PortalGridExecutionSource(), YouTubeExecutionSource()]
 
     def for_profile(self, url):
         for adapter in self.adapters:

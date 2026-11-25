@@ -16,10 +16,14 @@ export function projectSavedTimelineCreators(favorites:ProfileShortcut[], known:
     const previous=identities.get(identity);
     const name=favorite.name || previous?.name || '';
     const avatar=favorite.imageUrl || previous?.avatar || '';
+    const banner=previous?.banner || favorite.bannerUrl || undefined;
+    const entityKind=previous?.entityKind || favorite.entityKind;
+    const portalInfo=previous?.portalInfo || favorite.portalInfo;
+    const verified=previous?.verified ?? favorite.verified ?? false;
     const handle=resolveCreatorHandle({handle:previous?.handle, name, profileUrl:favorite.url});
-    const site=resolveTimelinePlatform(favorite.url, previous?.site) || previous?.site;
-    if(previous && previous.name===name && previous.avatar===avatar && previous.handle===handle && previous.site===site) return [previous];
-    return [{...previous,id:previous?.id || favorite.key,name,handle,avatar,site,
-      profileUrl:favorite.url,verified:previous?.verified ?? false,stats:previous?.stats || {}}];
+    const site=resolveTimelinePlatform(favorite.url, previous?.site || favorite.source) || previous?.site;
+    if(previous && previous.name===name && previous.avatar===avatar && previous.handle===handle && previous.site===site && previous.banner===banner && previous.entityKind===entityKind && previous.verified===verified) return [previous];
+    return [{...previous,id:previous?.id || favorite.key,name,handle,avatar,banner,site,entityKind,portalInfo,
+      profileUrl:favorite.url,verified,stats:previous?.stats || {}}];
   });
 }

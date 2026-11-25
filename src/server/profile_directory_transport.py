@@ -359,7 +359,7 @@ async def fetch_profile_metadata_html(adapter: DirectoryAdapter, requested_url: 
 
 async def fetch_directory_html(adapter: DirectoryAdapter, requested_url: str) -> tuple[str, str]:
     url = adapter.normalize_url(requested_url)
-    if adapter.adapter_id in ("pornhub", "xhamster"):
+    if getattr(adapter, "use_public_httpx_listing", False):
         return await _fetch_public_httpx_listing(adapter, url)
 
     requested_page = url

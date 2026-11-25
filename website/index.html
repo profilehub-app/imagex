@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="IMAGEX — Private local media timeline, Smart Shorts climax detection, and 0 MB Web Stream for Windows and mobile Wi-Fi.">
+  <title>IMAGEX — Private Local Media Timeline, Smart Shorts &amp; Web Stream</title>
+  <link rel="icon" href="./assets/app-icon.png" type="image/png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="#top">
+        <img class="brand-icon" src="./assets/app-icon.png" alt="IMAGEX" width="36" height="36" fetchpriority="high">
+        <span>IMAGEX</span>
+        <span id="release-version-pill" class="version-pill">v5.8+</span>
+      </a>
+
+      <nav class="header-nav" aria-label="Primary navigation">
+        <ul class="nav-links">
+          <li><a href="#features" data-i18n="navFeatures">Features</a></li>
+          <li><a href="#install" data-i18n="navQuickStart">Install &amp; Trust</a></li>
+          <li><a href="#community" data-i18n="navCommunity">Community</a></li>
+        </ul>
+
+        <div class="header-actions">
+          <div class="lang-switch" role="group" aria-label="Language switcher">
+            <button type="button" class="lang-btn" data-lang-btn="en" aria-pressed="true">EN</button>
+            <button type="button" class="lang-btn" data-lang-btn="pt-BR" aria-pressed="false">PT</button>
+          </div>
+          <a id="header-download-btn" class="btn btn-primary btn-compact" href="https://github.com/profilehub-app/imagex/releases/latest" target="_blank" rel="noopener noreferrer" data-i18n="navDownload">Download Free</a>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <span class="eyebrow" data-i18n="heroEyebrow">100% Free • Runs Locally on Windows &amp; Mobile Wi-Fi</span>
+          <h1 data-i18n="heroTitle">One private timeline for your creators, galleries, and videos.</h1>
+          <p class="hero-subtitle" data-i18n="heroSubtitle">
+            Stop juggling dozens of browser tabs and bloated folders. Unify your favorite web feeds locally, stream with 0 MB on disk, and jump straight to the best moments with Smart Shorts.
+          </p>
+
+          <div class="hero-cta-row">
+            <a id="hero-download-btn" class="btn btn-primary" href="https://github.com/profilehub-app/imagex/releases/latest" target="_blank" rel="noopener noreferrer" data-i18n="ctaDownload">Download for Windows</a>
+            <a id="hero-community-btn" class="btn btn-secondary" href="https://github.com/profilehub-app/imagex/releases/latest" target="_blank" rel="noopener noreferrer" hidden data-i18n="ctaCommunity">Join Community</a>
+            <a id="hero-donate-btn" class="btn btn-donate" href="https://github.com/profilehub-app/imagex/releases/latest" target="_blank" rel="noopener noreferrer" hidden data-i18n="ctaDonate">Support Project</a>
+            <a id="hero-source-btn" class="btn btn-secondary" href="https://github.com/profilehub-app/imagex" target="_blank" rel="noopener noreferrer" data-i18n="ctaSource">View Source on GitHub</a>
+          </div>
+          <p id="download-meta-text" class="download-meta" data-i18n="ctaDownloadMetaFallback">Latest GitHub Release • Portable ZIP</p>
+        </div>
+
+        <aside class="preview-shell" aria-label="Interactive product preview">
+          <div class="tablist" role="tablist" focusgroup="tablist nomemory" aria-label="Product workflows">
+            <button type="button" role="tab" id="tab-timeline" aria-selected="true" tabindex="0" focusgroupstart data-i18n="tabTimeline">Unified Timeline</button>
+            <button type="button" role="tab" id="tab-shorts" aria-selected="false" tabindex="-1" data-i18n="tabShorts">Smart Shorts</button>
+            <button type="button" role="tab" id="tab-stream" aria-selected="false" tabindex="-1" data-i18n="tabStream">Web Stream (0 MB)</button>
+            <button type="button" role="tab" id="tab-mobile" aria-selected="false" tabindex="-1" data-i18n="tabMobile">Mobile Wi-Fi</button>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-timeline">
+            <div class="tab-panel-card">
+              <span class="panel-badge" data-i18n="panelTimelineBadge">Profile Hub • Clean Start</span>
+              <h2 data-i18n="panelTimelineTitle">Your creators and local batches in one feed</h2>
+              <p data-i18n="panelTimelineDesc">Add creator links or local collections when you want. Filter by feed, inspect profiles without leaving the workspace, and pick exactly what to save.</p>
+              <div class="mock-frame" aria-hidden="true">
+                <div class="mock-row"><span>Timeline • Saved Creators</span><span class="mock-tag">Local Feed</span></div>
+                <div class="mock-row"><span>Profile Hub • Selected Albums</span><span class="mock-tag mock-tag--emerald">Max Res</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-shorts" hidden="until-found">
+            <div class="tab-panel-card">
+              <span class="panel-badge" data-i18n="panelShortsBadge">Gold / Silver / Bronze Climax Detection</span>
+              <h2 data-i18n="panelShortsTitle">Skip the slow buildup automatically</h2>
+              <p data-i18n="panelShortsDesc">Vertical 9:16 player with automatic highlight markers (15s, 30s, or 60s), persistent sound across swipes, and smart bandwidth preloading.</p>
+              <div class="mock-frame" aria-hidden="true">
+                <div class="mock-row"><span>Climax #1 • Peak Segment</span><span class="mock-tag mock-tag--gold">GOLD 30s</span></div>
+                <div class="mock-row"><span>Persistent Audio • Autoplay</span><span class="mock-tag">9:16 Shorts</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-stream" hidden="until-found">
+            <div class="tab-panel-card">
+              <span class="panel-badge" data-i18n="panelStreamBadge">Zero Disk Bloat</span>
+              <h2 data-i18n="panelStreamTitle">Collect &amp; watch without filling your SSD</h2>
+              <p data-i18n="panelStreamDesc">Save direct video streams using 0 MB on disk, renew expired links automatically, or archive original-resolution albums locally whenever you want.</p>
+              <div class="mock-frame" aria-hidden="true">
+                <div class="mock-row"><span>Origin Filter • Web Stream</span><span class="mock-tag mock-tag--emerald">0 MB Disk</span></div>
+                <div class="mock-row"><span>Link Healing • Renew Streams</span><span class="mock-tag">Auto Sync</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-mobile" hidden="until-found">
+            <div class="tab-panel-card">
+              <span class="panel-badge" data-i18n="panelMobileBadge">PC Server -&gt; Phone Browser</span>
+              <h2 data-i18n="panelMobileTitle">Browse comfortably from your phone on local Wi-Fi</h2>
+              <p data-i18n="panelMobileDesc">Run IMAGEX on your Windows PC and open http://&lt;YOUR_IP&gt;:8100 on any phone on the same Wi-Fi — no cloud upload, no third-party tracking.</p>
+              <div class="mock-frame" aria-hidden="true">
+                <div class="mock-row"><span>python -m src.main --server --port 8100</span><span class="mock-tag mock-tag--emerald">LAN Wi-Fi</span></div>
+                <div class="mock-row"><span>Mobile Drawer • Touch Gestures</span><span class="mock-tag">100% Local</span></div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <div class="container">
+        <header class="section-header">
+          <h2 data-i18n="whyHeading">Built for privacy, speed, and zero clutter</h2>
+          <p data-i18n="whySubheading">Everything stays on hardware you control, with zero accounts and zero subscription walls.</p>
+        </header>
+
+        <div class="cards-grid">
+          <article class="card">
+            <h3 data-i18n="card1Title">100% Local Privacy</h3>
+            <p data-i18n="card1Desc">No sign-up, no analytics trackers, and your libraries live strictly on your own disk unless you choose optional cloud backup.</p>
+          </article>
+          <article class="card">
+            <h3 data-i18n="card2Title">Original Resolution &amp; Dedupe</h3>
+            <p data-i18n="card2Desc">Capture full-resolution galleries and videos, then automatically detect duplicate albums or lower-resolution copies.</p>
+          </article>
+          <article class="card">
+            <h3 data-i18n="card3Title">Smart Highlights &amp; Scrubber</h3>
+            <p data-i18n="card3Desc">Spot peak moments visually on the timeline scrubber or browse them effortlessly inside the vertical Shorts feed.</p>
+          </article>
+          <article class="card">
+            <h3 data-i18n="card4Title">Open-Auditable Desktop + Web</h3>
+            <p data-i18n="card4Desc">Inspect the source code on GitHub, launch the portable IMAGEX.exe, or run straight from Python.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="install" class="section">
+      <div class="container">
+        <header class="section-header">
+          <h2 data-i18n="installHeading">Install in 60 seconds (and why SmartScreen appears)</h2>
+          <p data-i18n="installSubheading">Transparent instructions so you know exactly what you are running on Windows.</p>
+        </header>
+
+        <div class="cards-grid">
+          <article class="card">
+            <h3 data-i18n="step1Title">1. Download &amp; Extract</h3>
+            <p data-i18n="step1Desc">Grab IMAGEX-Windows.zip from GitHub Releases and extract the folder anywhere on your PC.</p>
+          </article>
+          <article class="card">
+            <h3 data-i18n="step2Title">2. Run IMAGEX.exe</h3>
+            <p data-i18n="step2Desc">Because independent builds do not buy an expensive corporate signing certificate yet, Windows SmartScreen may show a warning. Click "More info" -&gt; "Run anyway", or verify the public CI workflow that built the binary.</p>
+            <p><a id="ci-build-link" class="inline-link" href="https://github.com/profilehub-app/imagex/actions" target="_blank" rel="noopener noreferrer" data-i18n="step2BuildLogs">View GitHub Actions Build Logs -&gt;</a></p>
+          </article>
+          <article class="card">
+            <h3 data-i18n="step3Title">3. Optional Python / Chromium</h3>
+            <p data-i18n="step3Desc">Prefer running from source, or need full browser-backed extraction? Run python -m playwright install chromium and python -m src.main directly from the repo.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="community" class="section">
+      <div class="container">
+        <div class="community-box">
+          <h2 data-i18n="communityHeading">Free forever. Sustained by the community.</h2>
+          <p data-i18n="communityDesc">
+            IMAGEX never locks features behind paywalls or ads. Join our English-first Discord (with a dedicated #pt-br-chat channel) to request features, share setup tips, or donate voluntarily to keep development moving.
+          </p>
+
+          <div class="hero-cta-row">
+            <a id="section-community-btn" class="btn btn-primary" href="https://github.com/profilehub-app/imagex/releases/latest" target="_blank" rel="noopener noreferrer" hidden data-i18n="ctaCommunity">Join Community</a>
+            <a id="section-donate-btn" class="btn btn-donate" href="https://github.com/profilehub-app/imagex/releases/latest" target="_blank" rel="noopener noreferrer" hidden data-i18n="ctaDonate">Support Project</a>
+            <a id="section-donate-secondary-btn" class="btn btn-secondary" href="https://github.com/profilehub-app/imagex/releases/latest" target="_blank" rel="noopener noreferrer" hidden data-i18n="donateSecondaryLabel">Alternative Support</a>
+          </div>
+
+          <p id="community-pending-note" class="pending-note" data-i18n="communityPendingNotice">
+            Community and donation links are being finalized — check GitHub Releases for updates or add your URLs in website/config.js.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p data-i18n="footerLicense">IMAGEX • Proprietary Source-Available Desktop &amp; Local Web Suite.</p>
+      <div class="header-actions">
+        <a id="footer-repo-link" href="https://github.com/profilehub-app/imagex" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <div class="lang-switch" role="group" aria-label="Footer language switcher">
+          <button type="button" class="lang-btn" data-lang-btn="en" aria-pressed="true">EN</button>
+          <button type="button" class="lang-btn" data-lang-btn="pt-BR" aria-pressed="false">PT</button>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="./config.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

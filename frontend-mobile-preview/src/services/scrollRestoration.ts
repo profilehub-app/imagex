@@ -1,5 +1,5 @@
 /**
- * Scroll Restoration Service for ImageX AI
+ * Scroll Restoration Service for IMAGEX
  *
  * Provides reliable, instantaneous, flicker-free scroll position preservation
  * across views (currentView, activeAlbumId) and top session tabs (activeTabId).

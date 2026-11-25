@@ -21,13 +21,11 @@ from src.core.network_profiles import codec_compatibility_rank
 
 
 def select_playable_format(info):
-    """Select a self-contained progressive MP4 with explicitly known audio/video."""
+    """Select a self-contained progressive MP4 with audio and video."""
     formats = info.get('formats') if isinstance(info, dict) else None
     candidates = []
     for fmt in formats or []:
-        if not isinstance(fmt, dict) or fmt.get('ext') != 'mp4' or fmt.get('has_drm'):
-            continue
-        if any(not isinstance(fmt.get(key), str) or fmt[key].lower() in ('', 'none', 'unknown') for key in ('acodec', 'vcodec')):
+        if not isinstance(fmt, dict) or fmt.get('has_drm'):
             continue
         if fmt.get('manifest_url') or fmt.get('protocol') not in (None, 'http', 'https'):
             continue
@@ -35,7 +33,27 @@ def select_playable_format(info):
             stream = https_url(fmt.get('url'))
         except (ValueError, TypeError):
             continue
-        if '.m3u8' in urlsplit(stream).path.lower():
+        path_lower = urlsplit(stream).path.lower()
+        if '.m3u8' in path_lower or '.mpd' in path_lower:
+            continue
+        ext = (fmt.get('ext') or '').lower()
+        fmt_id = str(fmt.get('format_id') or '').lower()
+        acodec = fmt.get('acodec')
+        vcodec = fmt.get('vcodec')
+        # Explicitly reject audio-only or video-only streams
+        if any(isinstance(c, str) and c.lower() in ('none', 'unknown') for c in (acodec, vcodec)):
+            continue
+        has_explicit_codecs = (
+            isinstance(acodec, str) and bool(acodec.strip())
+            and isinstance(vcodec, str) and bool(vcodec.strip())
+        )
+        is_progressive_mp4_hint = (
+            ext in ('', 'mp4')
+            and acodec is None
+            and vcodec is None
+            and (fmt_id.startswith('mp4') or path_lower.endswith('.mp4'))
+        )
+        if not ((ext == 'mp4' and has_explicit_codecs) or is_progressive_mp4_hint):
             continue
         candidates.append(fmt)
     if not candidates:
@@ -43,7 +61,9 @@ def select_playable_format(info):
     def rank(fmt):
         height = fmt.get('height') if isinstance(fmt.get('height'), (float, int)) else 0
         bitrate = fmt.get('tbr') if isinstance(fmt.get('tbr'), (float, int)) else 0
-        return height or 0, codec_compatibility_rank(fmt), bitrate or 0
+        fid = str(fmt.get('format_id') or '').lower()
+        fid_tier = 2 if 'high' in fid or 'hd' in fid else (1 if 'med' in fid or 'mid' in fid else 0)
+        return height or 0, codec_compatibility_rank(fmt), fid_tier, bitrate or 0
     best = max(candidates, key=rank)
     return {'stream_url': best['url'], 'width': best.get('width'), 'height': best.get('height'),
             'duration_seconds': info.get('duration'), 'thumbnail_url': info.get('thumbnail')}
@@ -109,7 +129,15 @@ def hls_master_has_audio_video(text, base_url):
         if not line.startswith('#EXT-X-STREAM-INF:') or not re.search(r'(?:[:,])RESOLUTION=\d+x\d+', line):
             continue
         audio = re.search(r'(?:[:,])AUDIO="([^"]+)"', line)
-        if not audio or audio.group(1) not in groups:
+        has_group_audio = bool(audio and audio.group(1) in groups)
+        codecs_match = re.search(r'(?:[:,])CODECS="([^"]+)"', line, re.IGNORECASE)
+        has_muxed_codecs = False
+        if codecs_match:
+            codec_tokens = [tok.strip().lower() for tok in codecs_match.group(1).split(',') if tok.strip()]
+            has_vid_codec = any(tok.startswith(('avc1', 'hvc1', 'hev1', 'vp09', 'av01', 'mp4v')) for tok in codec_tokens)
+            has_aud_codec = any(tok.startswith(('mp4a', 'ac-3', 'ec-3', 'opus', 'mp3')) for tok in codec_tokens)
+            has_muxed_codecs = has_vid_codec and has_aud_codec
+        if not (has_group_audio or has_muxed_codecs):
             return False
         target = next((entry.strip() for entry in lines[index + 1:] if entry.strip()), '')
         if target.startswith('#'):

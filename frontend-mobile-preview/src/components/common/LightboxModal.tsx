@@ -411,9 +411,17 @@ export const LightboxModal: React.FC = () => {
   const isVideoItem = isVideoMedia(lightboxImage);
 
   const rawVideoSrc = lightboxImage.videoUrl || (lightboxImage as any).videoStreamUrl || lightboxImage.originalUrl;
-  const isPhVideo = Boolean(rawVideoSrc && (rawVideoSrc.includes('phncdn.com') || lightboxAlbum?.sourceUrl?.includes('pornhub.com')) && !rawVideoSrc.startsWith('/api/'));
-  const videoSrc = isPhVideo
-    ? `/api/proxy-video-stream?url=${encodeURIComponent(rawVideoSrc)}&referer=https://www.pornhub.com/`
+  const sourceReferer = (() => {
+    try {
+      const refUrl = (lightboxImage as any).sourcePage || lightboxAlbum?.sourceUrl;
+      return refUrl ? `${new URL(refUrl).origin}/` : '';
+    } catch {
+      return '';
+    }
+  })();
+  const needsProxyVideo = Boolean(rawVideoSrc && sourceReferer && !rawVideoSrc.startsWith('/api/') && rawVideoSrc.startsWith('http'));
+  const videoSrc = needsProxyVideo
+    ? `/api/proxy-video-stream?url=${encodeURIComponent(rawVideoSrc)}&referer=${encodeURIComponent(sourceReferer)}`
     : rawVideoSrc;
 
   const isGifItem = getMediaCategory(lightboxImage) === 'gif' || (lightboxImage as any).format === 'gif' || (lightboxImage as any).isAnimated === true;
@@ -424,9 +432,9 @@ export const LightboxModal: React.FC = () => {
   );
 
   const rawImgSrc = lightboxImage.originalUrl || lightboxImage.rawOriginalUrl || lightboxImage.previewUrl || lightboxImage.thumbnailUrl;
-  const isPhImg = Boolean(rawImgSrc && (rawImgSrc.includes('phncdn.com') || lightboxAlbum?.sourceUrl?.includes('pornhub.com')) && !rawImgSrc.startsWith('/api/'));
-  const imgSrc = isPhImg
-    ? `/api/proxy-image?url=${encodeURIComponent(rawImgSrc)}&referer=https://www.pornhub.com/`
+  const needsProxyImg = Boolean(rawImgSrc && sourceReferer && !rawImgSrc.startsWith('/api/') && rawImgSrc.startsWith('http'));
+  const imgSrc = needsProxyImg
+    ? `/api/proxy-image?url=${encodeURIComponent(rawImgSrc)}&referer=${encodeURIComponent(sourceReferer)}`
     : rawImgSrc;
 
   const ambientBgUrl = (isVideoItem || isGifItem)
@@ -557,8 +565,8 @@ export const LightboxModal: React.FC = () => {
           });
           if (res.success && res.is_resolved && res.original_url) {
             const resUrl = res.original_url;
-            targetSrc = (resUrl && (resUrl.includes('phncdn.com') || lightboxAlbum?.sourceUrl?.includes('pornhub.com')) && !resUrl.startsWith('/api/'))
-              ? `/api/proxy-image?url=${encodeURIComponent(resUrl)}&referer=https://www.pornhub.com/`
+            targetSrc = (resUrl && sourceReferer && !resUrl.startsWith('/api/') && resUrl.startsWith('http'))
+              ? `/api/proxy-image?url=${encodeURIComponent(resUrl)}&referer=${encodeURIComponent(sourceReferer)}`
               : resUrl;
           }
         } catch (_) {}

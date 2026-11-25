@@ -77,7 +77,7 @@ const STOPWORDS = new Set([
   'aqui', 'ali', 'voce', 'voces', 'meu', 'minha', 'seu', 'sua', 'seus', 'suas', 'assistir',
   'ver', 'parte', 'completo', 'completa',
   // Domain noise
-  'http', 'https', 'www', 'com', 'net', 'org', 'pornhub', 'eporner', 'xhamster', 'youtube',
+  'http', 'https', 'www', 'com', 'net', 'org', 'youtube',
 ]);
 
 function normalizeText(raw?: string | null): string {

@@ -29,6 +29,11 @@ jobs:
       - name: Compilar Frontend (Vite)
         env:
           VITE_SENTRY_DSN: ${{ vars.VITE_SENTRY_DSN }}
+          VITE_GITHUB_REPO: ${{ vars.VITE_GITHUB_REPO }}
+          VITE_PROMO_SITE_URL: ${{ vars.VITE_PROMO_SITE_URL }}
+          VITE_COMMUNITY_URL: ${{ vars.VITE_COMMUNITY_URL }}
+          VITE_DONATE_URL: ${{ vars.VITE_DONATE_URL }}
+          VITE_DONATE_SECONDARY_URL: ${{ vars.VITE_DONATE_SECONDARY_URL }}
         run: |
           cd frontend-mobile-preview
           npm install
@@ -38,17 +43,16 @@ jobs:
       - name: Instalar Dependências Python
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller playwright pywebview
+          pip install -r requirements-build.txt
           python -m playwright install chromium
 
       - name: Gerar Executável com PyInstaller
         run: |
-          python -m PyInstaller --clean --onefile --noconsole --paths . --collect-all src --collect-all webview --collect-all playwright --add-data "frontend-mobile-preview/dist;frontend-mobile-preview/dist" --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=uvicorn.lifespan.on src/main.py
+          python -m PyInstaller imagex-build.spec --noconfirm
 
       - name: Compactar para ZIP
         run: |
-          Compress-Archive -Path dist/main.exe -DestinationPath IMAGEX.AI-Windows.zip
+          Compress-Archive -Path dist/IMAGEX.exe -DestinationPath IMAGEX-Windows.zip
 
       - name: Publicar Release no GitHub
         uses: softprops/action-gh-release@v2
@@ -56,7 +60,7 @@ jobs:
           body_path: docs/release-notes-${{ github.ref_name }}.md
           fail_on_unmatched_files: true
           files: |
-            dist/main.exe
-            IMAGEX.AI-Windows.zip
+            dist/IMAGEX.exe
+            IMAGEX-Windows.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -7,7 +7,7 @@ import os
 import json
 
 pt_BR = {
-    "appName": "IMAGEX.AI",
+    "appName": "IMAGEX",
     "appSubtitle": "Studio Autônomo de Extração de Imagens Originais",
     "sidebar": {
         "home": "Início",
@@ -870,7 +870,7 @@ pt_BR = {
 }
 
 en_US = {
-    "appName": "IMAGEX.AI",
+    "appName": "IMAGEX",
     "appSubtitle": "Enterprise Autonomous Original Image Extraction Studio",
     "sidebar": {
         "home": "Home",

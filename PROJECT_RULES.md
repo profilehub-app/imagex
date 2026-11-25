@@ -30,11 +30,22 @@
   - Marcadores (notches) visuais no scrubber para os 3 destaques.
   - Conforme orientação posterior do usuário, mostrar somente as marcações na barra, sem botão ou ícone separado de Clímax.
 
+### 💬 Comentários na Origem & Audiência do Criador (Watch View)
+- **Declarado imutável pelo usuário em 24/11/2026.** Nenhuma IA ou agente autônomo está autorizado a alterar, refatorar ou degradar estes módulos sem consentimento explícito e por escrito do usuário:
+- **Backend de Comentários Paginados:** `src/server/profile_hub_comment_pages.py`
+  - Paginação progressiva read-only por cursor em memória, ordenação `popular` / `newest` para origens suportadas (`sort` + `supported_sorts`), decodificação de entidades HTML (`&nbsp;`, `&#039;`, `&amp;`, `<br>`), redirecionamentos same-origin e retry automático para falhas transitórias (`429`/`5xx`).
+- **Backend de Comentários Legado & Adaptadores:** `src/server/profile_hub_comments.py` e `src/server/profile_hub_comment_sources.py`
+  - Sanitização centralizada (`sanitize_comment_text`), extração de datas/curtidas e contratos polimórficos de ordenação (`supported_comment_sorts`, `comment_sort_page_url`) e audiência (`extract_profile_audience`).
+- **Backend de Watch & Enriquecimento Genérico de Audiência:** `src/server/profile_hub_watch.py`
+  - Enriquecimento agnóstico de origem (`_WatchAuthorProfileAdapter` + `_enrich_watch_audience`), sem nomes de sites hardcoded.
+- **Componente Frontend de Comentários:** `frontend-mobile-preview/src/components/profile-hub/timeline/SourceComments.tsx`
+  - Carregamento progressivo, cache por sessão/ordenação, alternador bilíngue `Popular` / `Newest` (`Populares` / `Mais recentes`) exibido somente quando a origem suporta ordenação, exibição de respostas e retry automático para falhas transitórias (`502`/`503`/`504`/`429`).
+- **Cliente de API de Watch & Comentários:** `frontend-mobile-preview/src/services/profileHubWatchApi.ts` e `frontend-mobile-preview/src/services/profileHubComments.ts`
+
 ---
 
 ## 2. Regra de Não-Destrutividade
 - **NUNCA** disparar reanálise ou sobrescrita em massa de metadados da biblioteca sem solicitação explícita do usuário.
-- Manter estrita sincronia e paridade entre `album-agent-main` e o workspace irmão `imagex-ai-v5.0`.
 
 ---
 

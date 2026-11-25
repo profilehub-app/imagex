@@ -9,12 +9,16 @@ import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass,field
 import json
+import logging
 import secrets
 import threading
 import time
+from urllib.parse import urljoin,urlsplit
 
 import httpx
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 from .profile_hub_execution import https_url,ExecutionError
 from .profile_hub_engagement import exact_source_count,youtube_reported_comment_total,_label_count
@@ -38,6 +42,8 @@ class Context:
     parents:dict=field(default_factory=dict)
     child_counts:dict=field(default_factory=dict)
     snapshot_complete:bool=False
+    sort:str|None=None
+    supported_sorts:list[str]=field(default_factory=list)
 
 
 @dataclass
@@ -111,10 +117,13 @@ def _entry(record,parent,reply_count=None,source_url=None):
     try:avatar=https_url(avatar) if isinstance(avatar,str) and avatar else ''
     except ValueError:avatar=''
     likes=exact_source_count(record.get('like_count'))
-    from .profile_hub_comment_sources import source_author_url,source_comment_reactions
-    entry={'id':identity,'parent':parent or 'root','author':record.get('author') if isinstance(record.get('author'),str) else '',
+    from .profile_hub_comment_sources import sanitize_comment_text,source_author_url,source_comment_reactions
+    clean_text=sanitize_comment_text(text)
+    clean_author=sanitize_comment_text(record.get('author'),preserve_newlines=False) if isinstance(record.get('author'),str) else ''
+    clean_time=sanitize_comment_text(record.get('_time_text'),preserve_newlines=False) if isinstance(record.get('_time_text'),str) else ''
+    entry={'id':identity,'parent':parent or 'root','author':clean_author,
         'author_url':source_author_url(record,source_url),
-        'avatar':avatar,'text':text,'time':record.get('_time_text') if isinstance(record.get('_time_text'),str) else '',
+        'avatar':avatar,'text':clean_text,'time':clean_time,
         'likes':str(likes) if likes is not None else '','reactions':source_comment_reactions(record),
         'reply_count':reply_count,'reply_context_available':False,'replies':[]}
     if record.get('hidden'):
@@ -216,13 +225,19 @@ async def _youtube_page(cursor):
             if reported is not None:context.reported_total=reported
             if isinstance(header,dict) and cursor.parent is None:
                 menu=header.get('sortMenu',{}).get('sortFilterSubMenuRenderer',{}).get('subMenuItems',[])
-                # Installed yt-dlp defines index1 as newest. This is source API
-                # order, never a local re-sort of a truncated result set.
                 if len(menu)>1:
-                    with yt_dlp.YoutubeDL({'quiet':True,'no_warnings':True,'cachedir':False}) as downloader:
-                        ie=YoutubeIE(downloader);sort=menu[1]
-                        query=ie._extract_continuation_ep_data(sort.get('serviceEndpoint') or {}) or ie._extract_continuation(sort)
-                    if query:response=await _youtube_rpc(context,query,stopped)
+                    context.supported_sorts=['popular','newest']
+                    requested_sort=context.sort if context.sort in ('popular','newest') else 'popular'
+                    context.sort=requested_sort
+                    # Index 0 is Top/Popular (already returned by default); index 1 is Newest.
+                    if requested_sort=='newest':
+                        with yt_dlp.YoutubeDL({'quiet':True,'no_warnings':True,'cachedir':False}) as downloader:
+                            ie=YoutubeIE(downloader);sort_item=menu[1]
+                            query=ie._extract_continuation_ep_data(sort_item.get('serviceEndpoint') or {}) or ie._extract_continuation(sort_item)
+                        if query:response=await _youtube_rpc(context,query,stopped)
+                else:
+                    context.supported_sorts=[]
+                    context.sort=None
             items=_continuation_items(response)
             mutations=response.get('frameworkUpdates',{}).get('entityBatchUpdate',{}).get('mutations',[])
             with yt_dlp.YoutubeDL({'quiet':True,'no_warnings':True,'cachedir':False}) as downloader:
@@ -241,7 +256,9 @@ async def _youtube_page(cursor):
             # empty. Replies also need positive API structure, not HTTP200.
             raise ValueError('comments_page_not_confirmed')
         return {'status':'ready','source_url':context.url,'entries':entries,'reported_total':context.reported_total if cursor.parent is None else None,
-            'complete':next_cursor is None,'next_cursor':next_cursor}
+            'complete':next_cursor is None,'next_cursor':next_cursor,
+            'sort':context.sort if cursor.parent is None else None,
+            'supported_sorts':list(context.supported_sorts) if cursor.parent is None else []}
     finally:stopped.set()
 
 
@@ -263,7 +280,9 @@ def _html_page(cursor):
     elif cursor.following and cursor.parent is None:token=_store.put(Cursor(context,query=cursor.following))
     else:token=None
     return {'status':'ready','source_url':context.url,'entries':entries,'reported_total':context.reported_total if cursor.parent is None else None,
-        'complete':context.snapshot_complete and token is None,'next_cursor':token}
+        'complete':context.snapshot_complete and token is None,'next_cursor':token,
+        'sort':context.sort if cursor.parent is None else None,
+        'supported_sorts':list(context.supported_sorts) if cursor.parent is None else []}
 
 
 def _remember_html_rows(context,records):
@@ -300,7 +319,63 @@ def _complete_lineage(parents):
     return True
 
 
-async def _html_initial(url,parent):
+async def _fetch_portal_comment_json(target_url: str, source) -> dict:
+    from .profile_hub_execution_runtime import PublicHTTPSHttpxTransport
+    from .profile_directory_transport import DEFAULT_TRANSPORT_HEADERS
+
+    safe_target = https_url(target_url)
+    origin_host = (urlsplit(safe_target).hostname or "").lower().removeprefix("www.")
+    headers = {**DEFAULT_TRANSPORT_HEADERS, "Accept": "application/json, text/plain, */*"}
+    desc = getattr(source, "desc", None)
+    if desc is not None:
+        headers.update(desc.default_headers(source.source_url))
+
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(
+                transport=PublicHTTPSHttpxTransport(),
+                follow_redirects=False,
+                timeout=max(PAGE_REQUEST_SECONDS, 12),
+                headers=headers,
+            ) as client:
+                current_url = safe_target
+                for _ in range(3):
+                    resp = await client.get(current_url)
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            break
+                        next_url = https_url(urljoin(current_url, loc))
+                        next_host = (urlsplit(next_url).hostname or "").lower().removeprefix("www.")
+                        same_owner = (
+                            desc.matches_host(next_host)
+                            if desc is not None
+                            else next_host == origin_host
+                        )
+                        if not same_owner:
+                            raise ValueError("comments_redirect_context_changed")
+                        current_url = next_url
+                        continue
+                    break
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+                    await asyncio.sleep(0.35)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            last_exc = exc
+            if attempt == 0 and not isinstance(exc, ValueError):
+                await asyncio.sleep(0.35)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError("comments_fetch_failed")
+
+
+async def _html_initial(url,parent,sort=None):
+    from urllib.parse import parse_qsl
     from selectolax.lexbor import LexborHTMLParser
     from .profile_hub_comment_sources import html_comment_source
     from .profile_directory_transport import fetch_source_html_shared
@@ -309,27 +384,55 @@ async def _html_initial(url,parent):
         if not token:raise HTTPException(410,detail={'code':'comments_reply_context_expired'})
         return _html_page(_store.get(token,url,parent))
     source=html_comment_source(url)
-    if source is None:return {'status':'unsupported','source_url':url,'entries':[],'reported_total':None,'complete':False,'next_cursor':None}
+    if source is None:return {'status':'unsupported','source_url':url,'entries':[],'reported_total':None,'complete':False,'next_cursor':None,'sort':None,'supported_sorts':[]}
     final,html=await fetch_source_html_shared(source,source.watch_fetch_url())
     tree=LexborHTMLParser(html);source.validate_watch_document(tree)
     total=source.engagement(html)['comment_count']
-    structured=getattr(source,'initial_comment_records',None)
-    structured_records=structured(html,final) if structured else None
-    block_count=sum(1 for b in tree.css(source.block_selector) if not source._is_template_or_clone_block(b))
-    if structured:
-        if structured_records is None:raise ValueError('comments_not_confirmed')
-        records=structured_records
-    elif not block_count:
-        if total!=0:raise ValueError('comments_not_confirmed')
-        records=[]
+    supported_sorts=list(source.supported_comment_sorts(html))
+    active_sort=(sort if sort in supported_sorts else supported_sorts[0]) if supported_sorts else None
+    if getattr(source, 'uses_json_comment_api', False):
+        initial_url, numeric_id = source.initial_comment_page_url(html, sort=active_sort)
+        if initial_url and numeric_id:
+            payload = await _fetch_portal_comment_json(initial_url, source)
+            records, following, reported_total = source.parse_comment_json_payload(payload, numeric_id, 0, sort=active_sort)
+            if total is None:
+                total = reported_total
+        else:
+            records, following = [], None
     else:
-        # Removed comments remain source-provided tombstones; no removed/private
-        # text is recovered. Legacy /comments keeps its previous filtering.
-        records=source.parse(html,final,block_count,include_unavailable=True)
+        sort_page_url = source.comment_sort_page_url(html, active_sort)
+        if sort_page_url:
+            sort_parts = urlsplit(sort_page_url)
+            class SortPageOwner:
+                def normalize_url(self, value, **_):
+                    safe_val = https_url(value)
+                    other = urlsplit(safe_val)
+                    if (other.hostname or '').removeprefix('www.') != (sort_parts.hostname or '').removeprefix('www.') \
+                            or other.path != sort_parts.path or sorted(parse_qsl(other.query, keep_blank_values=True)) != sorted(parse_qsl(sort_parts.query, keep_blank_values=True)):
+                        raise ValueError('comments_page_context_changed')
+                    return sort_page_url
+            _, sort_body = await fetch_source_html_shared(SortPageOwner(), sort_page_url)
+            records = source.parse_comment_fragment(sort_body)
+            following = source.next_comment_page(sort_body)
+        else:
+            structured=getattr(source,'initial_comment_records',None)
+            structured_records=structured(html,final) if structured else None
+            block_count=sum(1 for b in tree.css(source.block_selector) if not source._is_template_or_clone_block(b))
+            if structured:
+                if structured_records is None:raise ValueError('comments_not_confirmed')
+                records=structured_records
+            elif not block_count:
+                if total!=0:raise ValueError('comments_not_confirmed')
+                records=[]
+            else:
+                # Removed comments remain source-provided tombstones; no removed/private
+                # text is recovered. Legacy /comments keeps its previous filtering.
+                records=source.parse(html,final,block_count,include_unavailable=True)
+            following=source.next_comment_page(html)
     unique={row['id']:row for row in records}
-    following=source.next_comment_page(html)
     context=Context(url,'html',reported_total=total,
-        config={'page_identity':following['identity']} if following else {})
+        config={'page_identity':following['identity']} if following else {},
+        sort=active_sort,supported_sorts=supported_sorts)
     _remember_html_rows(context,list(unique.values()))
     context.snapshot_complete=following is None and total is not None and total==len(context.parents) and _complete_lineage(context.parents)
     return _html_page(Cursor(context,items=[row for row in unique.values() if row.get('parent')=='root'],following=following))
@@ -343,19 +446,25 @@ async def _html_remote_page(cursor):
     if source is None:raise ValueError('comments_source_not_installed')
     parts=urlsplit(target)
     if source.comment_page_identity(target)!=context.config.get('page_identity'):raise ValueError('comments_page_context_changed')
-    class PageOwner:
-        def normalize_url(self,value,**_):
-            safe=https_url(value)
-            other=urlsplit(safe)
-            if (other.hostname or '').removeprefix('www.')!=(parts.hostname or '').removeprefix('www.') \
-                    or other.path!=parts.path or sorted(parse_qsl(other.query,keep_blank_values=True))!=sorted(parse_qsl(parts.query,keep_blank_values=True)):
-                raise ValueError('comments_page_context_changed')
-            return target
-    _,body=await fetch_source_html_shared(PageOwner(),target)
-    # This endpoint returns the source's comment fragment, not a whole watch
-    # document. The wrapper supplies parser scope only; its contents are original.
-    records=source.parse_comment_fragment(body)
-    following=source.next_comment_page(body)
+    if getattr(source, 'uses_json_comment_api', False):
+        payload = await _fetch_portal_comment_json(target, source)
+        numeric_id = str(cursor.query.get('numeric_id') or '')
+        page_zero = int(cursor.query.get('page_zero') or 0)
+        records, following, _ = source.parse_comment_json_payload(payload, numeric_id, page_zero, sort=cursor.query.get('sort') or context.sort)
+    else:
+        class PageOwner:
+            def normalize_url(self,value,**_):
+                safe=https_url(value)
+                other=urlsplit(safe)
+                if (other.hostname or '').removeprefix('www.')!=(parts.hostname or '').removeprefix('www.') \
+                        or other.path!=parts.path or sorted(parse_qsl(other.query,keep_blank_values=True))!=sorted(parse_qsl(parts.query,keep_blank_values=True)):
+                    raise ValueError('comments_page_context_changed')
+                return target
+        _,body=await fetch_source_html_shared(PageOwner(),target)
+        # This endpoint returns the source's comment fragment, not a whole watch
+        # document. The wrapper supplies parser scope only; its contents are original.
+        records=source.parse_comment_fragment(body)
+        following=source.next_comment_page(body)
     if following and following['identity']!=context.config.get('page_identity'):
         raise ValueError('comments_page_context_changed')
     if following and following['url']==target:
@@ -366,8 +475,12 @@ async def _html_remote_page(cursor):
     return _html_page(Cursor(context,items=[row for row in records if row.get('parent')=='root'],following=following))
 
 
-async def read_comments_page(url,cursor_token=None,parent=None):
+async def read_comments_page(url,cursor_token=None,parent=None,sort=None):
     from .profile_hub_comments import youtube_identity,_read_source
+    if sort is not None and not isinstance(sort, str):
+        sort = getattr(sort, 'default', None)
+    if sort is not None and sort not in ('popular','newest'):
+        raise HTTPException(422,detail={'code':'invalid_comments_sort'})
     try:
         safe=https_url(url);identity=youtube_identity(safe)
         if identity is None:
@@ -378,7 +491,7 @@ async def read_comments_page(url,cursor_token=None,parent=None):
         async with asyncio.timeout(PAGE_TIMEOUT_SECONDS),_slots:
             if cursor_token:
                 cursor=_store.get(cursor_token,safe,parent)
-            elif identity is None:return await _html_initial(safe,parent)
+            elif identity is None:return await _html_initial(safe,parent,sort=sort)
             elif parent is not None:
                 token=_store.replies.get((safe,parent))
                 if not token:raise HTTPException(410,detail={'code':'comments_reply_context_expired'})
@@ -390,7 +503,7 @@ async def read_comments_page(url,cursor_token=None,parent=None):
                 async with httpx.AsyncClient(transport=PublicHTTPSHttpxTransport(),follow_redirects=False,timeout=PAGE_REQUEST_SECONDS,
                         headers={**DEFAULT_TRANSPORT_HEADERS,'Accept-Encoding':'identity'}) as client:html=await _read_source(client,canonical)
                 config,query=await asyncio.to_thread(_youtube_bootstrap,video_id,html)
-                cursor=Cursor(Context(safe,'youtube',video_id,config),query=query)
+                cursor=Cursor(Context(safe,'youtube',video_id,config,sort=sort or 'popular'),query=query)
                 cursor_token=_store.put(cursor)
             async with cursor.lock:
                 if cursor.response is None:
@@ -400,5 +513,9 @@ async def read_comments_page(url,cursor_token=None,parent=None):
                     _store.update(cursor_token)
                 return cursor.response
     except HTTPException:raise
-    except (TimeoutError,httpx.TimeoutException) as exc:raise HTTPException(504,detail={'code':'comments_timeout'}) from exc
-    except Exception as exc:raise HTTPException(502,detail={'code':'comments_source_unavailable'}) from exc
+    except (TimeoutError,httpx.TimeoutException) as exc:
+        logger.warning("comments_page timeout url=%s err=%r", safe, exc)
+        raise HTTPException(504,detail={'code':'comments_timeout'}) from exc
+    except Exception as exc:
+        logger.warning("comments_page unavailable url=%s err=%r", safe, exc)
+        raise HTTPException(502,detail={'code':'comments_source_unavailable'}) from exc

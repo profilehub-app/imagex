@@ -13,7 +13,6 @@ from selectolax.lexbor import LexborHTMLParser
 from .profile_hub_execution import https_url
 from .profile_hub_execution_runtime import PublicHTTPSHttpxTransport
 from .profile_directory_transport import DEFAULT_TRANSPORT_HEADERS, REQUEST_TIMEOUT, DirectoryFetchError
-from .profile_hub_workers import is_pornhub_host
 
 router = APIRouter()
 # Source-page lookups share two slots; media bytes still use the existing proxy.
@@ -25,7 +24,7 @@ def gif_source_identity(url):
     safe = https_url(url)
     parts = urlsplit(safe)
     match = re.fullmatch(r'/gif/(\d+)/?',parts.path)
-    if not is_pornhub_host(safe) or not match or parts.query:
+    if not match or parts.query:
         raise ValueError('Unsupported GIF source page')
     return match[1], safe
 
@@ -54,7 +53,7 @@ async def read_gif_video(url):
     async with asyncio.timeout(REQUEST_TIMEOUT), slots:
         async with httpx.AsyncClient(transport=PublicHTTPSHttpxTransport(), timeout=REQUEST_TIMEOUT,
                 follow_redirects=False,headers=DEFAULT_TRANSPORT_HEADERS) as client:
-            selected,html = await fetch_recent_html(safe,'pornhub',client)
+            selected,html = await fetch_recent_html(safe,'generic',client)
         return gif_video_from_page(html,selected)
 
 

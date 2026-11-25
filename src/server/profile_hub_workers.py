@@ -23,6 +23,51 @@ from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from selectolax.lexbor import LexborHTMLParser
 
+if __package__:
+    from .connector_registry import (
+        CatalogDescriptor,
+        ForumDescriptor,
+        VideoPortalDescriptor,
+        find_connector_for_url,
+    )
+    from .original_image_resolver import (
+        is_catalog_host,
+        is_forum_host,
+        is_image_viewer_url,
+        is_placeholder_media_url,
+    )
+    from .video_portal_engine import (
+        parse_portal_album_photos,
+        parse_portal_albums,
+        parse_portal_playlist_videos,
+        parse_portal_playlists,
+        parse_portal_profile_root,
+        parse_portal_video_cards,
+        extract_portal_max_page,
+    )
+else:
+    from src.server.connector_registry import (
+        CatalogDescriptor,
+        ForumDescriptor,
+        VideoPortalDescriptor,
+        find_connector_for_url,
+    )
+    from src.server.original_image_resolver import (
+        is_catalog_host,
+        is_forum_host,
+        is_image_viewer_url,
+        is_placeholder_media_url,
+    )
+    from src.server.video_portal_engine import (
+        parse_portal_album_photos,
+        parse_portal_albums,
+        parse_portal_playlist_videos,
+        parse_portal_playlists,
+        parse_portal_profile_root,
+        parse_portal_video_cards,
+        extract_portal_max_page,
+    )
+
 # Minimum HTML payload size (bytes) to offload single-page extraction to a child process.
 # Smaller snippets are faster to parse in-process with native Lexbor (~0.05ms vs ~1ms IPC).
 WORKER_OFFLOAD_MIN_BYTES = 32 * 1024
@@ -86,8 +131,8 @@ def image_url(
     return None
 
 
-def extract_eporner_videos_lexbor(source_url: str, html: str | LexborHTMLParser):
-    """Extract canonical and raw video card lists from a single Eporner listing page."""
+def extract_portal_grid_videos_lexbor(source_url: str, html: str | LexborHTMLParser):
+    """Extract canonical and raw video card lists from a single PortalGrid listing page."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
     canonical, raw = [], []
     for node in tree.css("div.mb"):
@@ -153,7 +198,7 @@ def extract_eporner_videos_lexbor(source_url: str, html: str | LexborHTMLParser)
     return canonical, raw
 
 
-def extract_eporner_root_lexbor(source_url: str, html: str | LexborHTMLParser):
+def extract_portal_grid_root_lexbor(source_url: str, html: str | LexborHTMLParser):
     """Extract performer identity, bio, pagination metadata, and page-1 videos."""
     if isinstance(html, LexborHTMLParser):
         tree = html
@@ -242,8 +287,8 @@ def extract_eporner_root_lexbor(source_url: str, html: str | LexborHTMLParser):
     total_photos_reported = int(p_digits) if p_digits.isdigit() else 0
     subscribers_str = sub_count_match.group(1) if sub_count_match else ""
     if not subscribers_str and re.fullmatch(r"/channel/[^/]+/?", urlsplit(source_url).path, re.I):
-        from .profile_hub_watch_sources import eporner_channel_subscribers
-        subscribers_str = eporner_channel_subscribers(tree) or ""
+        from .profile_hub_watch_sources import portal_grid_channel_subscribers
+        subscribers_str = portal_grid_channel_subscribers(tree) or ""
     views_str = views_count_match.group(1) if views_count_match else ""
     rank_str = rank_match.group(1) if rank_match else ""
 
@@ -301,11 +346,11 @@ def extract_eporner_root_lexbor(source_url: str, html: str | LexborHTMLParser):
         slug = parts[1] if len(parts) > 1 else parts[0]
         clean_slug = re.sub(r"-(?=[A-Za-z0-9]{4,12}$)(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]+$", "", slug)
 
-    videos_pair = extract_eporner_videos_lexbor(source_url, tree)
-    eporner_handle = f"@{clean_slug}" if clean_slug else (f"@{name.lower().replace(' ', '')}" if name else "")
+    videos_pair = extract_portal_grid_videos_lexbor(source_url, tree)
+    portal_grid_handle = f"@{clean_slug}" if clean_slug else (f"@{name.lower().replace(' ', '')}" if name else "")
     return {
         "name": name,
-        "handle": eporner_handle,
+        "handle": portal_grid_handle,
         "avatar": avatar,
         "tagline": tagline,
         "structured_bio": structured_bio,
@@ -320,8 +365,8 @@ def extract_eporner_root_lexbor(source_url: str, html: str | LexborHTMLParser):
     }
 
 
-def extract_eporner_albums_lexbor(source_url: str, html: str | LexborHTMLParser):
-    """Extract canonical and raw photo gallery cards from an Eporner photos page."""
+def extract_portal_grid_albums_lexbor(source_url: str, html: str | LexborHTMLParser):
+    """Extract canonical and raw photo gallery cards from an PortalGrid photos page."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
     canonical, raw = [], []
     for it in tree.css(".photosgrid .mbphoto2, div[class*=mbphoto]"):
@@ -364,7 +409,7 @@ def extract_eporner_albums_lexbor(source_url: str, html: str | LexborHTMLParser)
     return canonical, raw
 
 
-def extract_eporner_playlists_lexbor(
+def extract_portal_grid_playlists_lexbor(
     source_url: str,
     page_url: str,
     html: str | LexborHTMLParser,
@@ -396,7 +441,7 @@ def extract_eporner_playlists_lexbor(
             pl_id = pl_id_match.group(1) if pl_id_match else ""
             author_match = re.search(r"/profile/([^/]+)/", pl_url)
             author_name = author_match.group(1) if author_match else None
-            author_url = f"https://www.eporner.com/profile/{author_name}/" if author_name else None
+            author_url = http_url(source_url, f"/profile/{author_name}/") if author_name else None
             canonical.append({
                 "id": f"pl-{pl_id}" if pl_id else "",
                 "title": pl_title,
@@ -935,8 +980,8 @@ def _extract_yt_post_images(post: dict) -> list[tuple[str, str, int, int]]:
     return results
 
 
-def extract_youtube_albums_lexbor(source_url: str, html: str | LexborHTMLParser | dict):
-    """Extract image-bearing community posts from a YouTube /posts tab as photo albums."""
+def extract_youtube_albums_lexbor(source_url: str, html: str | LexborHTMLParser | dict, fallback_avatar: str = ""):
+    """Extract community posts from a YouTube /posts tab as community/photo albums."""
     data = html if isinstance(html, dict) else _extract_yt_initial_data(html)
     canonical, raw = [], []
     seen_urls = set()
@@ -954,22 +999,25 @@ def extract_youtube_albums_lexbor(source_url: str, html: str | LexborHTMLParser 
             post = node["backstagePostRenderer"]
             post_id = (post.get("postId") or "").strip()
             images = _extract_yt_post_images(post)
-            if post_id and images:
+            text_content = _yt_text(post.get("contentText"))
+            if post_id and (images or text_content):
                 alb_url = f"https://www.youtube.com/post/{post_id}"
                 if alb_url not in seen_urls:
                     seen_urls.add(alb_url)
-                    text_content = _yt_text(post.get("contentText"))
                     pub_time = _normalize_yt_relative_date(_yt_text(post.get("publishedTimeText")))
                     if text_content:
                         first_line = text_content.splitlines()[0].strip()
                         alb_title = (first_line[:72] + "…") if len(first_line) > 72 else first_line
                     else:
                         alb_title = f"Community Post ({pub_time})" if pub_time else f"Post {post_id[:8]}"
-                    thumb_url = images[0][0]
+                    thumb_url = images[0][0] if images else (fallback_avatar or "")
+                    photo_urls = [im[0] for im in images if im[0]]
                     canonical.append({
                         "id": f"alb-{post_id}",
                         "title": alb_title,
+                        "description": text_content or alb_title,
                         "photoCount": len(images),
+                        "photos": photo_urls,
                         "updatedAt": pub_time,
                         "updatedAtRaw": pub_time or None,
                         "lastAddedDate": pub_time or None,
@@ -1123,16 +1171,16 @@ def extract_youtube_root_lexbor(source_url: str, html: str | LexborHTMLParser):
 
 
 # ============================================================================
-# PORNHUB EXTRACTORS
+# PORTAL_TUBE EXTRACTORS
 # ============================================================================
 
-def is_pornhub_host(url: str) -> bool:
+def is_portal_tube_host(url: str) -> bool:
     host = urlsplit(url).netloc.lower()
-    return bool(re.search(r"(?:^|\.)pornhub\.[a-z.]+$", host))
+    return bool(re.search(r"(?:^|\.)portal_tube\.[a-z.]+$", host))
 
 
-def is_pornhub_profile_url(url: str) -> bool:
-    if not is_pornhub_host(url):
+def is_portal_tube_profile_url(url: str) -> bool:
+    if not is_portal_tube_host(url):
         return False
     path = urlsplit(url).path.rstrip("/").lower()
     return bool(
@@ -1143,20 +1191,20 @@ def is_pornhub_profile_url(url: str) -> bool:
     )
 
 
-def normalize_pornhub_profile_base_url(url: str) -> str:
-    """Normalize language subdomains (e.g. pt.pornhub.com -> www.pornhub.com) and strip subpaths."""
-    u = re.sub(r"^https?://(?:[a-z]{2})\.(pornhub\.[a-z.]+)", r"https://www.\1", url.strip(), flags=re.I)
+def normalize_portal_tube_profile_base_url(url: str) -> str:
+    """Normalize language subdomains (e.g. pt.portal-tube.example -> www.portal-tube.example) and strip subpaths."""
+    u = re.sub(r"^https?://(?:[a-z]{2})\.(portal_tube\.[a-z.]+)", r"https://www.\1", url.strip(), flags=re.I)
     parsed = urlsplit(u)
     m = re.match(r"^/(pornstar|model|channels|users)/([a-zA-Z0-9_\-]+)", parsed.path, re.I)
     if m:
         base_path = f"/{m.group(1).lower()}/{m.group(2)}"
         scheme = parsed.scheme or "https"
-        netloc = parsed.netloc or "www.pornhub.com"
+        netloc = parsed.netloc or "www.portal-tube.example"
         return f"{scheme}://{netloc}{base_path}"
     return u.rstrip("/")
 
 
-_PORNHUB_SITEWIDE_SELECTORS = (
+_PORTAL_TUBE_SITEWIDE_SELECTORS = (
     "#header",
     "#headerWrapper",
     "#headerMainMenu",
@@ -1182,14 +1230,14 @@ _PORNHUB_SITEWIDE_SELECTORS = (
 )
 
 
-def _decompose_pornhub_sitewide(tree: LexborHTMLParser) -> None:
-    for sel in _PORNHUB_SITEWIDE_SELECTORS:
+def _decompose_portal_tube_sitewide(tree: LexborHTMLParser) -> None:
+    for sel in _PORTAL_TUBE_SITEWIDE_SELECTORS:
         for n in tree.css(sel):
             n.decompose()
 
 
-def extract_pornhub_max_video_page(html: str | LexborHTMLParser) -> int:
-    """Detect maximum video pagination page number from Pornhub performer videos HTML."""
+def extract_portal_tube_max_video_page(html: str | LexborHTMLParser) -> int:
+    """Detect maximum video pagination page number from PortalTube performer videos HTML."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
     max_p = 1
     for a in tree.css(
@@ -1226,10 +1274,10 @@ def extract_pornhub_max_video_page(html: str | LexborHTMLParser) -> int:
     return max_p
 
 
-def extract_pornhub_videos_lexbor(source_url: str, html: str | LexborHTMLParser):
-    """Extract canonical and raw video card lists from a Pornhub listing or profile page."""
+def extract_portal_tube_videos_lexbor(source_url: str, html: str | LexborHTMLParser):
+    """Extract canonical and raw video card lists from a PortalTube listing or profile page."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
-    _decompose_pornhub_sitewide(tree)
+    _decompose_portal_tube_sitewide(tree)
     canonical, raw = [], []
     seen = set()
 
@@ -1244,7 +1292,7 @@ def extract_pornhub_videos_lexbor(source_url: str, html: str | LexborHTMLParser)
         if link is None:
             continue
         v_href = link.attributes.get("href") or ""
-        v_url = http_url("https://www.pornhub.com", v_href)
+        v_url = http_url(source_url, v_href)
         if not v_url or v_url in seen:
             continue
         seen.add(v_url)
@@ -1330,15 +1378,15 @@ def extract_pornhub_videos_lexbor(source_url: str, html: str | LexborHTMLParser)
             "views": views,
             "timeAgo": time_ago,
             "uploader": uploader,
-            "evidence": "pornhub video card",
+            "evidence": "portal_tube video card",
         })
     return canonical, raw
 
 
-def extract_pornhub_albums_lexbor(source_url: str, html: str | LexborHTMLParser):
-    """Extract canonical and raw photo album cards from a Pornhub photos tab."""
+def extract_portal_tube_albums_lexbor(source_url: str, html: str | LexborHTMLParser):
+    """Extract canonical and raw photo album cards from a PortalTube photos tab."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
-    _decompose_pornhub_sitewide(tree)
+    _decompose_portal_tube_sitewide(tree)
     canonical, raw = [], []
     seen = set()
 
@@ -1370,7 +1418,7 @@ def extract_pornhub_albums_lexbor(source_url: str, html: str | LexborHTMLParser)
 
     for a, card_el in anchors:
         href = a.attributes.get("href") or ""
-        alb_url = http_url("https://www.pornhub.com", href)
+        alb_url = http_url(source_url, href)
         if not alb_url or alb_url in seen:
             continue
         seen.add(alb_url)
@@ -1424,12 +1472,12 @@ def extract_pornhub_albums_lexbor(source_url: str, html: str | LexborHTMLParser)
     return canonical, raw
 
 
-def extract_pornhub_playlists_lexbor(
+def extract_portal_tube_playlists_lexbor(
     source_url: str, html: str | LexborHTMLParser, fallback_avatar: str = ""
 ):
-    """Extract canonical and raw playlist cards from a Pornhub playlists tab."""
+    """Extract canonical and raw playlist cards from a PortalTube playlists tab."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
-    _decompose_pornhub_sitewide(tree)
+    _decompose_portal_tube_sitewide(tree)
     canonical, raw = [], []
     seen = set()
 
@@ -1489,7 +1537,7 @@ def extract_pornhub_playlists_lexbor(
 
     for a, card_el, custom_title in anchors:
         href = a.attributes.get("href") or ""
-        pl_url = http_url("https://www.pornhub.com", href)
+        pl_url = http_url(source_url, href)
         if not pl_url or pl_url in seen:
             continue
         seen.add(pl_url)
@@ -1560,7 +1608,7 @@ def extract_pornhub_playlists_lexbor(
                 author = (user_el.attributes.get("title") or user_el.text(strip=True) or "").strip() or None
                 u_href = user_el.attributes.get("href") or ""
                 if u_href:
-                    author_url = http_url("https://www.pornhub.com", u_href)
+                    author_url = http_url(source_url, u_href)
 
         canonical.append({
             "id": f"pl-{pl_id}",
@@ -1587,10 +1635,10 @@ def extract_pornhub_playlists_lexbor(
     return canonical, raw
 
 
-def extract_pornhub_gifs_lexbor(source_url: str, html: str | LexborHTMLParser):
-    """Extract canonical and raw GIF items from a Pornhub GIFs tab."""
+def extract_portal_tube_gifs_lexbor(source_url: str, html: str | LexborHTMLParser):
+    """Extract canonical and raw GIF items from a PortalTube GIFs tab."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
-    _decompose_pornhub_sitewide(tree)
+    _decompose_portal_tube_sitewide(tree)
     canonical, raw = [], []
     seen = set()
 
@@ -1601,7 +1649,7 @@ def extract_pornhub_gifs_lexbor(source_url: str, html: str | LexborHTMLParser):
         if not link:
             continue
         g_href = link.attributes.get("href") or ""
-        g_url = http_url("https://www.pornhub.com", g_href)
+        g_url = http_url(source_url, g_href)
         if not g_url or g_url in seen:
             continue
         seen.add(g_url)
@@ -1677,15 +1725,15 @@ def extract_pornhub_gifs_lexbor(source_url: str, html: str | LexborHTMLParser):
             "source_url": g_url,
             "title": title,
             "cover_url": poster,
-            "evidence": "pornhub gif card",
+            "evidence": "portal_tube gif card",
         })
     return canonical, raw
 
 
-def extract_pornhub_root_lexbor(source_url: str, html: str | LexborHTMLParser) -> dict:
-    """Extract Pornhub performer/channel root data: name, avatar, cover, bio, and page 1 videos."""
+def extract_portal_tube_root_lexbor(source_url: str, html: str | LexborHTMLParser) -> dict:
+    """Extract PortalTube performer/channel root data: name, avatar, cover, bio, and page 1 videos."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
-    _decompose_pornhub_sitewide(tree)
+    _decompose_portal_tube_sitewide(tree)
 
     # 1. Name
     h1 = (
@@ -1843,17 +1891,17 @@ def extract_pornhub_root_lexbor(source_url: str, html: str | LexborHTMLParser) -
     social_links = {}
     for sa in tree.css("a[href]"):
         shref = sa.attributes.get("href") or ""
-        if "pornhub" in shref.lower():
+        if "portal_tube" in shref.lower():
             continue
         if "twitter.com" in shref or "x.com" in shref:
             social_links["Twitter"] = shref
         elif "instagram.com" in shref:
             social_links["Instagram"] = shref
-        elif "onlyfans.com" in shref:
-            social_links["OnlyFans"] = shref
+        elif "creator_club.com" in shref:
+            social_links["CreatorClub"] = shref
 
     # 7. Page 1 videos
-    videos_pair = extract_pornhub_videos_lexbor(source_url, tree)
+    videos_pair = extract_portal_tube_videos_lexbor(source_url, tree)
     clean_slug = quote(re.sub(r"\s+", "-", name.lower()), safe="-")
 
     # 8. Total videos, photos & GIFs reported
@@ -1892,7 +1940,7 @@ def extract_pornhub_root_lexbor(source_url: str, html: str | LexborHTMLParser) -
                 total_gifs_reported = max(total_gifs_reported or 0, int(m_gtot.group(1).replace(",", "")))
 
     return {
-        "platform": "pornhub",
+        "platform": "portal_tube",
         "name": name,
         "handle": f"@{name.lower().replace(' ', '')}",
         "avatar": avatar,
@@ -1912,16 +1960,16 @@ def extract_pornhub_root_lexbor(source_url: str, html: str | LexborHTMLParser) -
 
 
 # ============================================================================
-# XHAMSTER EXTRACTORS
+# PORTAL_STATE EXTRACTORS
 # ============================================================================
 
-def is_xhamster_host(url: str) -> bool:
+def is_portal_state_host(url: str) -> bool:
     host = urlsplit(url).netloc.lower()
-    return bool(re.search(r"(?:^|\.)(xhamster|xhcdn|xhday|xhvideotop|xhamsterlive|xhamster\d*)\.[a-z.]+$", host))
+    return bool(re.search(r"(?:^|\.)(portal_state|portal_state_cdn|xhday|xhvideotop|portal_statelive|portal_state\d*)\.[a-z.]+$", host))
 
 
-def is_xhamster_profile_url(url: str) -> bool:
-    if not is_xhamster_host(url):
+def is_portal_state_profile_url(url: str) -> bool:
+    if not is_portal_state_host(url):
         return False
     path = urlsplit(url).path.rstrip("/").lower()
     return bool(
@@ -1932,21 +1980,21 @@ def is_xhamster_profile_url(url: str) -> bool:
     ) or "/users/profiles/" in path
 
 
-def normalize_xhamster_profile_base_url(url: str) -> str:
-    """Normalize language subdomains (e.g. pt.xhamster.com -> xhamster.com) and strip subpaths."""
-    u = re.sub(r"^https?://(?:[a-z]{2,3})\.(xhamster\.[a-z.]+)", r"https://\1", url.strip(), flags=re.I)
+def normalize_portal_state_profile_base_url(url: str) -> str:
+    """Normalize language subdomains (e.g. pt.portal-state.example -> portal-state.example) and strip subpaths."""
+    u = re.sub(r"^https?://(?:[a-z]{2,3})\.(portal_state\.[a-z.]+)", r"https://\1", url.strip(), flags=re.I)
     parsed = urlsplit(u)
     m = re.match(r"^/(pornstars|channels|creators|users)/([a-zA-Z0-9_\-]+)", parsed.path, re.I)
     if m:
         base_path = f"/{m.group(1).lower()}/{m.group(2)}"
         scheme = parsed.scheme or "https"
-        netloc = "xhamster.com" if "xhamster" in (parsed.netloc or "") else (parsed.netloc or "xhamster.com")
+        netloc = "portal-state.example" if "portal_state" in (parsed.netloc or "") else (parsed.netloc or "portal-state.example")
         return f"{scheme}://{netloc}{base_path}"
     return u.rstrip("/")
 
 
-def extract_xhamster_max_video_page(html: str | LexborHTMLParser, total_videos: int | None = None) -> int:
-    """Detect maximum video pagination page number for xHamster performer or channel."""
+def extract_portal_state_max_video_page(html: str | LexborHTMLParser, total_videos: int | None = None) -> int:
+    """Detect maximum video pagination page number for PortalState performer or channel."""
     html_text = html if isinstance(html, str) else (getattr(html, "html", "") or "")
     max_page = 1
     if html_text:
@@ -1963,7 +2011,7 @@ def extract_xhamster_max_video_page(html: str | LexborHTMLParser, total_videos: 
     return max_page
 
 
-def _extract_xhamster_initials(html_or_tree: str | LexborHTMLParser) -> dict:
+def _extract_window_initials(html_or_tree: str | LexborHTMLParser) -> dict:
     html_text = html_or_tree if isinstance(html_or_tree, str) else (getattr(html_or_tree, "html", "") or "")
     if not html_text:
         return {}
@@ -1976,17 +2024,17 @@ def _extract_xhamster_initials(html_or_tree: str | LexborHTMLParser) -> dict:
     return {}
 
 
-def extract_xhamster_videos_lexbor(source_url: str, html: str | LexborHTMLParser | dict) -> tuple[list, list]:
-    """Extract canonical and raw video items from xHamster profile or subpages."""
+def extract_portal_state_videos_lexbor(source_url: str, html: str | LexborHTMLParser | dict) -> tuple[list, list]:
+    """Extract canonical and raw video items from PortalState profile or subpages."""
     if isinstance(html, dict):
         initials = html
         tree = LexborHTMLParser("")
     elif isinstance(html, LexborHTMLParser):
         tree = html
-        initials = _extract_xhamster_initials(tree)
+        initials = _extract_window_initials(tree)
     else:
         tree = LexborHTMLParser(html or "")
-        initials = _extract_xhamster_initials(html or "")
+        initials = _extract_window_initials(html or "")
 
     canonical, raw = [], []
     seen = set()
@@ -2130,10 +2178,10 @@ def extract_xhamster_videos_lexbor(source_url: str, html: str | LexborHTMLParser
     return canonical, raw
 
 
-def extract_xhamster_shorts_lexbor(source_url: str, html: str | LexborHTMLParser) -> tuple[list, list]:
-    """Extract animated shorts / moments from xHamster /shorts tab."""
+def extract_portal_state_shorts_lexbor(source_url: str, html: str | LexborHTMLParser) -> tuple[list, list]:
+    """Extract animated shorts / moments from PortalState /shorts tab."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html or "")
-    initials = _extract_xhamster_initials(html if isinstance(html, str) else tree)
+    initials = _extract_window_initials(html if isinstance(html, str) else tree)
     canonical = []
     raw = []
     seen = set()
@@ -2178,7 +2226,7 @@ def extract_xhamster_shorts_lexbor(source_url: str, html: str | LexborHTMLParser
             "title": title,
             "cover_url": high_thumb,
             "video_url": trailer,
-            "provenance": {"page_url": source_url, "evidence": "xhamster shorts", "ownership": "unverified"},
+            "provenance": {"page_url": source_url, "evidence": "portal_state shorts", "ownership": "unverified"},
         })
 
     # 2. From DOM elements fallback
@@ -2225,15 +2273,15 @@ def extract_xhamster_shorts_lexbor(source_url: str, html: str | LexborHTMLParser
             "title": alt,
             "cover_url": thumb or "",
             "video_url": preview_clip,
-            "provenance": {"page_url": source_url, "evidence": "xhamster shorts", "ownership": "unverified"},
+            "provenance": {"page_url": source_url, "evidence": "portal_state shorts", "ownership": "unverified"},
         })
     return canonical, raw
 
 
-def extract_xhamster_albums_lexbor(source_url: str, html: str | LexborHTMLParser) -> tuple[list, list]:
-    """Extract photo galleries / albums linked to an xHamster performer or user."""
+def extract_portal_state_albums_lexbor(source_url: str, html: str | LexborHTMLParser) -> tuple[list, list]:
+    """Extract photo galleries / albums linked to an PortalState performer or user."""
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html or "")
-    initials = _extract_xhamster_initials(html if isinstance(html, str) else tree)
+    initials = _extract_window_initials(html if isinstance(html, str) else tree)
     canonical, raw = [], []
     seen = set()
 
@@ -2333,16 +2381,26 @@ def extract_xhamster_albums_lexbor(source_url: str, html: str | LexborHTMLParser
     return canonical, raw
 
 
-def extract_xhamster_subscribers(tree: LexborHTMLParser, initials: dict | None = None) -> str | None:
+def extract_portal_state_subscribers(tree: LexborHTMLParser, initials: dict | None = None) -> str | None:
     """Read explicit owner statistics, never counts in comments/recommendations.
 
     Keep abbreviated source values abbreviated: 3.1K is not an exact 3,100.
     """
-    initials = initials if initials is not None else _extract_xhamster_initials(tree)
+    initials = initials if initials is not None else _extract_window_initials(tree)
     info = initials.get("infoComponent")
     buttons = info.get("subscribeButtonsProps") if isinstance(info, dict) else None
     button = buttons.get("subscribeButtonProps") if isinstance(buttons, dict) else None
-    owners = [button, initials.get("counters"), initials.get("displayUserModel")]
+    sub_comp = initials.get("subscriptionComponent")
+    sub_comp_buttons = sub_comp.get("subscribeButtonsProps") if isinstance(sub_comp, dict) else None
+    sub_comp_btn = (
+        sub_comp_buttons.get("subscribeButtonProps")
+        if isinstance(sub_comp_buttons, dict)
+        else (sub_comp.get("subscribeButtonProps") if isinstance(sub_comp, dict) else None)
+    )
+    owners = [button, sub_comp_btn, initials.get("counters"), initials.get("displayUserModel")]
+    pornstar_sec = initials.get("pornstarSectionComponent")
+    if isinstance(pornstar_sec, dict) and isinstance(pornstar_sec.get("subscriptionModel"), dict):
+        owners.append(pornstar_sec["subscriptionModel"])
 
     def count_text(value):
         if isinstance(value, bool):
@@ -2380,8 +2438,8 @@ def extract_xhamster_subscribers(tree: LexborHTMLParser, initials: dict | None =
     return next(iter(values)) if len(values) == 1 else None
 
 
-def extract_xhamster_root_lexbor(source_url: str, html: str | LexborHTMLParser) -> dict:
-    """Extract xHamster performer/channel/user root metadata, counters, bio, and initial video batch."""
+def extract_portal_state_root_lexbor(source_url: str, html: str | LexborHTMLParser) -> dict:
+    """Extract PortalState performer/channel/user root metadata, counters, bio, and initial video batch."""
     if isinstance(html, LexborHTMLParser):
         tree = html
         html_text = tree.html or ""
@@ -2389,7 +2447,7 @@ def extract_xhamster_root_lexbor(source_url: str, html: str | LexborHTMLParser) 
         html_text = str(html or "")
         tree = LexborHTMLParser(html_text)
 
-    initials = _extract_xhamster_initials(html_text)
+    initials = _extract_window_initials(html_text)
 
     # 1. Name
     name = None
@@ -2469,7 +2527,7 @@ def extract_xhamster_root_lexbor(source_url: str, html: str | LexborHTMLParser) 
     handle = f"@{clean_slug}"
 
     # 6. Statistics & Counters
-    subscribers = extract_xhamster_subscribers(tree, initials)
+    subscribers = extract_portal_state_subscribers(tree, initials)
     total_views = None
     total_videos_reported = None
     if "infoComponent" in initials and "pornstarTop" in initials["infoComponent"]:
@@ -2528,8 +2586,8 @@ def extract_xhamster_root_lexbor(source_url: str, html: str | LexborHTMLParser) 
         structured_bio["Views"] = views_str
 
     # 8. Video and Album batches
-    videos_pair = extract_xhamster_videos_lexbor(source_url, tree)
-    albums_pair = extract_xhamster_albums_lexbor(source_url, tree)
+    videos_pair = extract_portal_state_videos_lexbor(source_url, tree)
+    albums_pair = extract_portal_state_albums_lexbor(source_url, tree)
     cnt_data = initials.get("counters") if isinstance(initials.get("counters"), dict) else {}
     raw_galleries = cnt_data.get("galleries") if cnt_data.get("galleries") is not None else cnt_data.get("photos")
     galleries_reported = 0
@@ -2539,7 +2597,7 @@ def extract_xhamster_root_lexbor(source_url: str, html: str | LexborHTMLParser) 
         galleries_reported = int(raw_galleries.strip())
 
     return {
-        "platform": "xhamster",
+        "platform": "portal_state",
         "name": name,
         "handle": handle,
         "avatar": avatar,
@@ -2782,7 +2840,7 @@ def extract_video_metadata_lexbor(html: str | LexborHTMLParser) -> dict:
             result.update(uploadedAt=stamp, timeAgo=stamp or "")
 
     if not result["uploadedAt"]:
-        initials = _extract_xhamster_initials(html if isinstance(html, str) else getattr(tree, "html", ""))
+        initials = _extract_window_initials(html if isinstance(html, str) else getattr(tree, "html", ""))
         ve = initials.get("videoEntity") or {}
         vm = initials.get("videoModel") or {}
         source_dict = vm or ve
@@ -2918,7 +2976,7 @@ def extract_collection_metadata_lexbor(
                         result["reportedCount"] = len(imgs)
                     break
 
-    if is_pornhub_host(source_url):
+    if is_portal_tube_host(source_url):
         raw_html = tree.html if hasattr(tree, "html") else str(html)
         m_pv = re.search(r"PLAYLIST_VIEW\s*=\s*(\{.+?\});", raw_html)
         if m_pv:
@@ -2951,7 +3009,7 @@ def extract_collection_metadata_lexbor(
                 result["author"] = (owner.attributes.get("title") or owner.text(strip=True) or "").strip() or None
                 o_href = owner.attributes.get("href") or ""
                 if o_href:
-                    result["authorUrl"] = http_url("https://www.pornhub.com", o_href)
+                    result["authorUrl"] = http_url(source_url, o_href)
             if result["reportedCount"] is None:
                 m_cnt = re.search(r"(\d+)\s*videos?", about.text(separator=" ", strip=True), re.I)
                 if m_cnt:
@@ -2964,8 +3022,8 @@ def extract_collection_metadata_lexbor(
         if v_node and not result["views"]:
             result["views"] = v_node.text(strip=True)
 
-    if is_xhamster_host(source_url):
-        initials = _extract_xhamster_initials(html if isinstance(html, str) else getattr(tree, "html", ""))
+    if is_portal_state_host(source_url):
+        initials = _extract_window_initials(html if isinstance(html, str) else getattr(tree, "html", ""))
         gp = initials.get("galleryPage", {})
         if gp:
             author_info = gp.get("infoProps", {}).get("authorInfoProps", {}) if isinstance(gp.get("infoProps"), dict) else {}
@@ -3069,6 +3127,10 @@ def _within_recommendations_lexbor(node) -> bool:
 
 
 def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dict:
+    if isinstance(html, str):
+        conn = find_connector_for_url(final_url)
+        if isinstance(conn, VideoPortalDescriptor):
+            return parse_portal_album_photos(html, final_url, conn)
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
     photos = []
     seen = set()
@@ -3119,10 +3181,10 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
             **metadata,
         }
 
-    if is_pornhub_host(final_url):
-        _decompose_pornhub_sitewide(tree)
+    if is_portal_tube_host(final_url):
+        _decompose_portal_tube_sitewide(tree)
         if "/gifs" in urlsplit(final_url).path.lower() or tree.css_first("li.gifVideoBlock, li.gifListItem, li.gifLi") is not None:
-            gifs_can, _ = extract_pornhub_gifs_lexbor(final_url, tree)
+            gifs_can, _ = extract_portal_tube_gifs_lexbor(final_url, tree)
             if gifs_can:
                 metadata = extract_collection_metadata_lexbor(tree, final_url, "album")
                 metadata["reportedCount"] = max(metadata.get("reportedCount") or 0, len(gifs_can))
@@ -3146,7 +3208,7 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
             if not thumb or thumb in seen:
                 continue
             seen.add(thumb)
-            p_url = http_url("https://www.pornhub.com", a.attributes.get("href") if a else "") or final_url
+            p_url = http_url(source_url, a.attributes.get("href") if a else "") or final_url
             m_pid = re.search(r"/photo/(\d+)", p_url)
             pid = m_pid.group(1) if m_pid else str(idx + 1)
             photos.append({
@@ -3177,11 +3239,11 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
             **metadata,
         }
 
-    if is_xhamster_host(final_url):
-        initials = _extract_xhamster_initials(html if isinstance(html, str) else getattr(tree, "html", ""))
+    if is_portal_state_host(final_url):
+        initials = _extract_window_initials(html if isinstance(html, str) else getattr(tree, "html", ""))
         path_lower = urlsplit(final_url).path.lower()
         if "/shorts" in path_lower:
-            shorts_can, _ = extract_xhamster_shorts_lexbor(final_url, tree)
+            shorts_can, _ = extract_portal_state_shorts_lexbor(final_url, tree)
             p_name = ""
             p_views = ""
             if "infoComponent" in initials and "pornstarTop" in initials["infoComponent"]:
@@ -3194,7 +3256,7 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
                 h1 = tree.css_first("h1")
                 p_name = h1.text(strip=True) if h1 else "Shorts"
 
-            author_url = normalize_xhamster_profile_base_url(final_url)
+            author_url = normalize_portal_state_profile_base_url(final_url)
             photos = []
             for it in shorts_can:
                 photos.append({
@@ -3297,39 +3359,114 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
             **metadata,
         }
 
-    # Dedicated fast path for PornPics galleries
-    if "pornpics.com" in final_url.lower() or tree.css_first("ul#tiles, a.rel-link") is not None:
+    # Dedicated fast path for visual catalog galleries
+    _cat_conn = find_connector_for_url(final_url)
+    if (
+        isinstance(_cat_conn, CatalogDescriptor)
+        or tree.css_first("ul#tiles, a.rel-link") is not None
+    ):
         h1 = tree.css_first("h1")
-        gallery_title = h1.text(separator="", strip=True) if h1 is not None else "PornPics Gallery"
-        for idx, a in enumerate(tree.css("ul#tiles a.rel-link, a.rel-link")):
+        gallery_title = (h1.text(separator="", strip=True) if h1 is not None else "") or "Gallery"
+        anchor_nodes = tree.css("ul#tiles a.rel-link, a.rel-link")
+        if isinstance(_cat_conn, CatalogDescriptor) and not anchor_nodes:
+            img_sel = str(_cat_conn.selectors.get("galleryImages") or 'a[href*="/1280/"], div.thumbs a[href], div.gallery a[href], main a[href]')
+            anchor_nodes = [
+                a
+                for a in tree.css(img_sel)
+                if a.css_first("img") is not None or re.search(r"\.(?:jpe?g|png|webp|avif|gif)(?:\?|$)", a.attributes.get("href") or "", re.I)
+            ]
+        thumb_upgrade = _cat_conn.browse.get("thumbUpgrade") if isinstance(_cat_conn, CatalogDescriptor) else ["/460/", "/1280/"]
+        for a in anchor_nodes:
             href = http_url(final_url, a.attributes.get("href") or "")
+            if href and (is_placeholder_media_url(href) or "/models/" in href.lower() or href.lower().endswith(".svg")):
+                href = None
             img = a.css_first("img")
-            thumb = (img.attributes.get("data-src") or img.attributes.get("src")) if img else ""
-            thumb_url = http_url(final_url, thumb) or href
-            high_res = href or (thumb_url.replace("/460/", "/1280/") if "/460/" in thumb_url else thumb_url)
-            if not high_res or high_res in seen or "base64" in high_res:
+            thumb_url = (image_url(final_url, img.attributes) if img else None) or ""
+            if thumb_url and ("/models/" in thumb_url.lower() or thumb_url.lower().endswith(".svg")):
+                thumb_url = ""
+            if not thumb_url and href and isinstance(thumb_upgrade, (list, tuple)) and len(thumb_upgrade) == 2 and str(thumb_upgrade[1]) in href:
+                thumb_url = href.replace(str(thumb_upgrade[1]), str(thumb_upgrade[0]), 1)
+            upgraded_thumb = thumb_url
+            if thumb_url and isinstance(thumb_upgrade, (list, tuple)) and len(thumb_upgrade) == 2:
+                if str(thumb_upgrade[0]) in thumb_url:
+                    upgraded_thumb = thumb_url.replace(str(thumb_upgrade[0]), str(thumb_upgrade[1]), 1)
+                elif str(thumb_upgrade[1]) == "/1280/" and "/300/" in thumb_url:
+                    upgraded_thumb = thumb_url.replace("/300/", "/1280/", 1)
+            high_res = (
+                href
+                if (href and not is_image_viewer_url(href) and re.search(r"\.(?:jpe?g|png|webp|avif|gif)(?:\?|$)", href, re.I))
+                else (upgraded_thumb or href or thumb_url)
+            )
+            if (
+                not high_res
+                or high_res in seen
+                or is_placeholder_media_url(high_res)
+                or "/models/" in high_res.lower()
+                or high_res.lower().endswith(".svg")
+            ):
                 continue
             seen.add(high_res)
-            seen.add(thumb_url)
+            if thumb_url:
+                seen.add(thumb_url)
             alt = (img.attributes.get("alt") if img else "") or a.attributes.get("title") or f"{gallery_title} #{len(photos) + 1}"
+            is_gif = ".gif" in high_res.lower()
             photos.append({
                 "id": "photo-" + hashlib.sha256(high_res.encode()).hexdigest()[:16],
                 "title": alt,
-                "thumbnailUrl": thumb_url,
+                "thumbnailUrl": thumb_url or high_res,
                 "originalUrl": high_res,
                 "pageUrl": final_url,
                 "sourcePage": final_url,
                 "resolution": "1280xauto" if "/1280/" in high_res else "auto",
                 "timeAgo": "",
-                "type": "photo",
-                "format": "jpg",
-                "isAnimated": False,
+                "type": "gif" if is_gif else "photo",
+                "format": "gif" if is_gif else "jpg",
+                "isAnimated": is_gif,
                 "isResolvedOriginal": True,
                 "width": 1280 if "/1280/" in high_res else 0,
                 "height": 0,
             })
         if photos:
             metadata = extract_collection_metadata_lexbor(tree, final_url, "album")
+            models: list[str] = []
+            channels: list[str] = []
+            tags: list[str] = []
+            first_author_url = None
+            meta_sel = (
+                str(_cat_conn.selectors.get("galleryMeta"))
+                if isinstance(_cat_conn, CatalogDescriptor) and _cat_conn.selectors.get("galleryMeta")
+                else ".content-categories a[href], .gallery-info a[href], #gallery-info a[href], .tags a[href], .models a[href]"
+            )
+            for info_a in tree.css(meta_sel):
+                label = (info_a.text(strip=True) or "").strip()
+                link_href = http_url(final_url, info_a.attributes.get("href") or "")
+                if not label or not link_href:
+                    continue
+                low_href = urlsplit(link_href).path.lower()
+                artist_prefs = tuple(_cat_conn.selectors.get("artistPrefixes") or ()) if isinstance(_cat_conn, CatalogDescriptor) else ()
+                channel_prefs = tuple(_cat_conn.selectors.get("channelPrefixes") or ()) if isinstance(_cat_conn, CatalogDescriptor) else ()
+                if "/artists/" in low_href or "/models/" in low_href or "/pornstars/" in low_href or any(p in low_href for p in artist_prefs):
+                    if label not in models:
+                        models.append(label)
+                    if not first_author_url:
+                        first_author_url = link_href
+                elif "/channels/" in low_href or "/creators/" in low_href or any(p in low_href for p in channel_prefs):
+                    if label not in channels:
+                        channels.append(label)
+                    if not first_author_url:
+                        first_author_url = link_href
+                elif "/galleries/" not in low_href and low_href not in ("/", "/popular/", "/recent/", "/rating/", "/likes/", "/views/"):
+                    if label not in tags:
+                        tags.append(label)
+            if models and not metadata.get("author"):
+                metadata["author"] = models[0]
+            elif channels and not metadata.get("author"):
+                metadata["author"] = channels[0]
+            if first_author_url and not metadata.get("authorUrl"):
+                metadata["authorUrl"] = first_author_url
+            metadata["models"] = models
+            metadata["channels"] = channels
+            metadata["tags"] = tags
             metadata["reportedCount"] = max(metadata.get("reportedCount") or 0, len(photos))
             for p in photos:
                 p.update(timeAgo=metadata["updatedAt"], metadataStatus=metadata["metadataStatus"])
@@ -3338,54 +3475,51 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
                 "gallery_url": final_url,
                 "count": len(photos),
                 "photos": photos,
+                "currentPage": 1,
+                "totalPages": 1,
+                "hasMore": False,
+                "nextPageUrl": None,
                 "paginationComplete": True,
                 **metadata,
             }
 
-    # Dedicated fast path for Forum and Image Board threads (e.g. ViperGirls)
-    forum_posts = tree.css("div.postbody, blockquote.postcontent, div.post_message, div.content")
+    # Dedicated fast path for Forum and Image Board threads (delegated cleanly to forum_board_engine)
+    _forum_conn = find_connector_for_url(final_url)
+    forum_posts = tree.css("blockquote.postcontent, div[id^='post_message_']") or tree.css("div.postbody, div.post_message, div.content")
     if forum_posts:
-        h1 = tree.css_first("h1, span.threadtitle, title")
-        thread_title = h1.text(separator="", strip=True) if h1 is not None else "Gallery"
-        for post in forum_posts:
-            for a in post.css("a"):
-                img = a.css_first("img")
-                if not img:
-                    continue
-                href = http_url(final_url, a.attributes.get("href") or "")
-                thumb = http_url(final_url, img.attributes.get("src") or img.attributes.get("data-src") or "")
-                if not thumb or thumb in seen or any(k in thumb.lower() for k in ("logo", "icon", "banner", "avatar", "advert", "button", "sprite", "rating")):
-                    continue
-                high_res = thumb.replace("/u/t/", "/u/i/") if "/u/t/" in thumb else (href if (href and re.search(r"\.(?:jpe?g|png|webp|avif|gif)(?:\?|$)", href, re.I)) else thumb)
-                seen.add(thumb)
-                seen.add(high_res)
-                photos.append({
-                    "id": "photo-" + hashlib.sha256(high_res.encode()).hexdigest()[:16],
-                    "title": f"{thread_title} #{len(photos) + 1}",
-                    "thumbnailUrl": thumb,
-                    "originalUrl": high_res,
-                    "pageUrl": href or final_url,
-                    "sourcePage": final_url,
-                    "resolution": "auto",
-                    "timeAgo": "",
-                    "type": "photo",
-                    "format": "jpg",
-                    "isAnimated": False,
-                    "isResolvedOriginal": True if "/u/i/" in high_res else False,
-                    "width": 0,
-                    "height": 0,
-                })
-        if photos:
+        if __package__:
+            from .forum_board_engine import parse_forum_thread_page
+        else:
+            from src.server.forum_board_engine import parse_forum_thread_page
+        parsed_thread = parse_forum_thread_page(
+            html,
+            final_url,
+            _forum_conn if isinstance(_forum_conn, ForumDescriptor) else None,
+        )
+        photos_f = parsed_thread.get("photos") or []
+        if photos_f or is_forum_host(final_url):
             metadata = extract_collection_metadata_lexbor(tree, final_url, "album")
-            metadata["reportedCount"] = max(metadata.get("reportedCount") or 0, len(photos))
-            for p in photos:
+            if parsed_thread.get("author") and not metadata.get("author"):
+                metadata["author"] = parsed_thread["author"]
+            if parsed_thread.get("authorUrl") and not metadata.get("authorUrl"):
+                metadata["authorUrl"] = parsed_thread["authorUrl"]
+            metadata["reportedCount"] = max(metadata.get("reportedCount") or 0, len(photos_f))
+            for p in photos_f:
                 p.update(timeAgo=metadata["updatedAt"], metadataStatus=metadata["metadataStatus"])
             return {
                 "success": True,
                 "gallery_url": final_url,
-                "count": len(photos),
-                "photos": photos,
-                "paginationComplete": True,
+                "count": len(photos_f),
+                "photos": photos_f,
+                "posts": parsed_thread.get("posts") or [],
+                "breadcrumbs": parsed_thread.get("breadcrumbs") or [],
+                "threadKind": parsed_thread.get("threadKind") or "inline_album",
+                "releaseSpecs": parsed_thread.get("releaseSpecs") or [],
+                "currentPage": parsed_thread.get("currentPage") or 1,
+                "totalPages": parsed_thread.get("totalPages") or 1,
+                "hasMore": bool(parsed_thread.get("hasMore")),
+                "nextPageUrl": parsed_thread.get("nextPageUrl"),
+                "paginationComplete": bool(parsed_thread.get("paginationComplete", True)),
                 **metadata,
             }
 
@@ -3414,7 +3548,7 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
         src_url = http_url(final_url, src)
         if not src_url or src_url in seen or "base64" in src_url:
             continue
-        if any(k in src_url.lower() for k in ("logo", "icon", "banner", "avatar", "advert", "button", "sprite", "rating", "pixel")):
+        if any(k in src_url.lower() for k in ("logo", "icon", "banner", "avatar", "advert", "button", "sprite", "rating", "pixel", "/models/", ".svg")):
             continue
         seen.add(src_url)
 
@@ -3427,16 +3561,18 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
             curr = curr.parent
 
         linked = http_url(final_url, anchor.attributes.get("href")) if anchor is not None else None
-        is_direct_img = bool(linked and re.search(r"\.(?:jpe?g|png|webp|avif|gif)(?:\?|$)", linked, re.I))
+        linked_is_viewer = bool(linked and is_image_viewer_url(linked))
+        is_direct_img = bool(
+            linked
+            and not linked_is_viewer
+            and re.search(r"\.(?:jpe?g|png|webp|avif|gif)(?:\?|$)", linked, re.I)
+        )
         
         # High-res inference from common CDN thumbnail conventions
         if is_direct_img:
             high_res = linked
-        elif "/460/" in src_url and "pornpics.com" in src_url:
+        elif "/460/" in src_url and is_catalog_host(src_url):
             high_res = src_url.replace("/460/", "/1280/")
-            is_direct_img = True
-        elif "/u/t/" in src_url:
-            high_res = src_url.replace("/u/t/", "/u/i/")
             is_direct_img = True
         elif re.search(r'_\d+x\d+\.(?:jpe?g|png|webp|gif)', src_url, re.I):
             high_res = re.sub(r'_\d+x\d+\.(jpe?g|png|webp|gif)(\?.*)?$', r'.\1\2', src_url, flags=re.I)
@@ -3479,6 +3615,10 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
 
 
 def parse_playlist_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dict:
+    if isinstance(html, str):
+        conn = find_connector_for_url(final_url)
+        if isinstance(conn, VideoPortalDescriptor):
+            return parse_portal_playlist_videos(html, final_url, conn)
     tree = html if isinstance(html, LexborHTMLParser) else LexborHTMLParser(html)
     videos = []
     seen = set()
@@ -3506,8 +3646,8 @@ def parse_playlist_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> 
             **metadata,
         }
 
-    if is_pornhub_host(final_url):
-        ph_videos, _ = extract_pornhub_videos_lexbor(final_url, tree)
+    if is_portal_tube_host(final_url):
+        ph_videos, _ = extract_portal_tube_videos_lexbor(final_url, tree)
         for v in ph_videos:
             orig_url = v.get("originalUrl")
             if not orig_url or orig_url in seen:
@@ -3580,17 +3720,60 @@ def parse_playlist_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> 
     }
 
 
+def extract_video_portal_root_lexbor(final_url: str, html: str) -> dict[str, Any]:
+    conn = find_connector_for_url(final_url)
+    if not isinstance(conn, VideoPortalDescriptor):
+        return {"metadata": {}, "videos": [], "max_page": 1}
+    meta = parse_portal_profile_root(html, final_url, conn)
+    videos = parse_portal_video_cards(html, final_url, conn)
+    max_page = extract_portal_max_page(html, conn)
+    return {"metadata": meta, "videos": videos, "max_page": max_page}
+
+
+def extract_video_portal_videos_lexbor(final_url: str, html: str) -> tuple[list[dict[str, Any]], int]:
+    conn = find_connector_for_url(final_url)
+    if not isinstance(conn, VideoPortalDescriptor):
+        return [], 1
+    return parse_portal_video_cards(html, final_url, conn), extract_portal_max_page(html, conn)
+
+
+def extract_video_portal_albums_lexbor(final_url: str, html: str) -> list[dict[str, Any]]:
+    conn = find_connector_for_url(final_url)
+    if not isinstance(conn, VideoPortalDescriptor):
+        return []
+    return parse_portal_albums(html, final_url, conn)
+
+
+def extract_video_portal_playlists_lexbor(
+    final_url: str,
+    html: str,
+    fallback_avatar: str = "",
+) -> list[dict[str, Any]]:
+    conn = find_connector_for_url(final_url)
+    if not isinstance(conn, VideoPortalDescriptor):
+        return []
+    return parse_portal_playlists(html, final_url, conn, fallback_avatar=fallback_avatar)
+
+
 def worker_execute(task: tuple):
     """Top-level picklable entrypoint executed inside persistent worker processes."""
     op = task[0]
-    if op == "eporner_root":
-        return extract_eporner_root_lexbor(task[1], task[2])
-    if op == "eporner_videos":
-        return extract_eporner_videos_lexbor(task[1], task[2])
-    if op == "eporner_albums":
-        return extract_eporner_albums_lexbor(task[1], task[2])
-    if op == "eporner_playlists":
-        return extract_eporner_playlists_lexbor(task[1], task[2], task[3], task[4])
+    if op == "video_portal_root":
+        return extract_video_portal_root_lexbor(task[1], task[2])
+    if op == "video_portal_videos":
+        return extract_video_portal_videos_lexbor(task[1], task[2])
+    if op == "video_portal_albums":
+        return extract_video_portal_albums_lexbor(task[1], task[2])
+    if op == "video_portal_playlists":
+        return extract_video_portal_playlists_lexbor(task[1], task[2], task[3] if len(task) > 3 else "")
+    if op == "portal_grid_root":
+        return extract_portal_grid_root_lexbor(task[1], task[2])
+    if op == "portal_grid_videos":
+        return extract_portal_grid_videos_lexbor(task[1], task[2])
+    if op == "portal_grid_albums":
+        return extract_portal_grid_albums_lexbor(task[1], task[2])
+    if op == "portal_grid_playlists":
+        return extract_portal_grid_playlists_lexbor(task[1], task[2], task[3], task[4])
     if op == "youtube_root":
         return extract_youtube_root_lexbor(task[1], task[2])
     if op == "youtube_videos":
@@ -3599,22 +3782,22 @@ def worker_execute(task: tuple):
         return extract_youtube_albums_lexbor(task[1], task[2])
     if op == "youtube_playlists":
         return extract_youtube_playlists_lexbor(task[1], task[2], task[3], task[4])
-    if op == "pornhub_root":
-        return extract_pornhub_root_lexbor(task[1], task[2])
-    if op == "pornhub_videos":
-        return extract_pornhub_videos_lexbor(task[1], task[2])
-    if op == "pornhub_albums":
-        return extract_pornhub_albums_lexbor(task[1], task[2])
-    if op == "pornhub_playlists":
-        return extract_pornhub_playlists_lexbor(task[1], task[2], task[3] if len(task) > 3 else "")
-    if op == "pornhub_gifs":
-        return extract_pornhub_gifs_lexbor(task[1], task[2])
-    if op == "xhamster_videos":
-        return extract_xhamster_videos_lexbor(task[1], task[2])
-    if op == "xhamster_albums":
-        return extract_xhamster_albums_lexbor(task[1], task[2])
-    if op == "xhamster_shorts":
-        return extract_xhamster_shorts_lexbor(task[1], task[2])
+    if op == "portal_tube_root":
+        return extract_portal_tube_root_lexbor(task[1], task[2])
+    if op == "portal_tube_videos":
+        return extract_portal_tube_videos_lexbor(task[1], task[2])
+    if op == "portal_tube_albums":
+        return extract_portal_tube_albums_lexbor(task[1], task[2])
+    if op == "portal_tube_playlists":
+        return extract_portal_tube_playlists_lexbor(task[1], task[2], task[3] if len(task) > 3 else "")
+    if op == "portal_tube_gifs":
+        return extract_portal_tube_gifs_lexbor(task[1], task[2])
+    if op == "portal_state_videos":
+        return extract_portal_state_videos_lexbor(task[1], task[2])
+    if op == "portal_state_albums":
+        return extract_portal_state_albums_lexbor(task[1], task[2])
+    if op == "portal_state_shorts":
+        return extract_portal_state_shorts_lexbor(task[1], task[2])
     if op == "metadata":
         _, url, final_url, kind, html = task
         meta = (

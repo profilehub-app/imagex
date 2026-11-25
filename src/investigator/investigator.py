@@ -358,32 +358,9 @@ class OriginalImageInvestigator:
 
     def _generate_cdn_candidates(self, src_url: str) -> List[str]:
         """
-        Generates candidate URLs using common CDN structural transformations.
+        Generates candidate URLs using shared deterministic CDN structural transformations.
         NOTE: These are candidate-only hypotheses and MUST pass full validation.
         """
-        candidates = []
-        p1 = re.sub(r'/(460|thumbs?|thumbnails?|small|medium|preview)/', '/original/', src_url)
-        if p1 != src_url:
-            candidates.append(p1)
-        p2 = re.sub(r'/(460|thumbs?|thumbnails?|small|medium|preview)/', '/1280/', src_url)
-        if p2 != src_url:
-            candidates.append(p2)
-        p3 = re.sub(r'/(460|thumbs?|thumbnails?|small|medium|preview)/', '/1920/', src_url)
-        if p3 != src_url:
-            candidates.append(p3)
-        p4 = re.sub(r'/(460|thumbs?|thumbnails?|small|medium|preview)/', '/full/', src_url)
-        if p4 != src_url:
-            candidates.append(p4)
-        p5 = re.sub(r'/(460|thumbs?|thumbnails?|small|medium|preview)/', '/large/', src_url)
-        if p5 != src_url:
-            candidates.append(p5)
+        from ..server.original_image_resolver import generate_deterministic_original_candidates
 
-        p6 = re.sub(r'_(thumb|small|preview|\d+x\d+)\.', '.', src_url)
-        if p6 != src_url:
-            candidates.append(p6)
-
-        p7 = re.sub(r'/thumb_([^/]+)$', r'/\1', src_url)
-        if p7 != src_url:
-            candidates.append(p7)
-
-        return candidates
+        return generate_deterministic_original_candidates(src_url)

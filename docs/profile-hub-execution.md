@@ -63,9 +63,8 @@ replace a newer review. Effects and rendering perform no confirmation POST.
 
 ## Sources and media
 
-`ExecutionSources` is an adapter registry. The implemented adapter supports
-recognized Eporner profiles, video routes, playlists and galleries; this is not
-universal source support. Collection pagination follows discovered links with
+`ExecutionSources` is an adapter registry for recognized profile, video,
+playlist and gallery routes. Collection pagination follows discovered links with
 the same collection identity, at most 100 pages and 20,000 records. Unavailable
 pages, context changes, changed/contradictory counts or incomplete originals fail
 the root instead of silently processing an incomplete collection as complete.
@@ -153,7 +152,7 @@ AST helper, without importing application startup. Node tests cover immutable
 requests, duplicate clicks, uncertain outcomes, recovery, partial failure and
 SSR/locales. Existing Hub/directory regressions and TypeScript/Vite build run.
 
-No live Eporner extraction, physical media download, personal-library operation,
+No live extraction, physical media download, personal-library operation,
 browser visit or secondary agent was used in this stage. Existing legacy premium
 audit findings remain separately documented; static/SSR checks do not establish
 pixel fidelity or full accessibility/mobile/theme compliance.

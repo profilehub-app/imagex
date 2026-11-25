@@ -10,6 +10,7 @@ import {
   Film
 } from 'lucide-react';
 import { TimelineCreator, resolveCreatorHandle, resolveTimelinePlatform } from './timelineModel';
+import { getDynamicSourceLabel, getSourceCapabilities } from './timelineSourceCapabilities';
 import { SourceAvatar } from '../common/SourceAvatar';
 import { useResolvedAvatar } from '../../../store/useProfileAvatarStore';
 import { useProfileTimelineStore } from '../../../store/useProfileTimelineStore';
@@ -61,28 +62,45 @@ export const AdaptiveProfileHeader: React.FC<AdaptiveProfileHeaderProps> = ({
   // Identificação do badge da plataforma
   const site = resolveTimelinePlatform(creator.profileUrl, creator.site) || '';
   const platformBadges: Record<string, { label: string; icon: React.ReactNode; colorClass: string }> = {
+    x: {
+      label: isEn ? 'X profile' : 'Perfil no X',
+      icon: <Globe className="w-3.5 h-3.5" />,
+      colorClass: 'bg-[var(--tl-surface-glass)] text-[var(--tl-accent-text)] border-[var(--tl-accent-border)]'
+    },
     youtube: {
       label: isEn ? 'YouTube Channel' : 'Canal YouTube',
       icon: <Youtube className="w-3.5 h-3.5 text-red-500 fill-red-500" />,
       colorClass: 'bg-[var(--tl-surface-glass)] text-red-300 border-red-500/40'
     },
-    eporner: {
-      label: isEn ? 'Eporner Creator' : 'Criador Eporner',
-      icon: <Film className="w-3.5 h-3.5 text-[var(--tl-accent-text)]" />,
-      colorClass: 'bg-[var(--tl-surface-glass)] text-[var(--tl-accent-text)] border-[var(--tl-accent-border)]'
-    },
-    pornhub: {
-      label: isEn ? 'Pornhub Creator' : 'Criador Pornhub',
-      icon: <Film className="w-3.5 h-3.5 text-amber-400" />,
-      colorClass: 'bg-[var(--tl-surface-glass)] text-amber-300 border-amber-500/40'
-    },
-    xhamster: {
-      label: isEn ? 'xHamster Creator' : 'Criador xHamster',
-      icon: <Film className="w-3.5 h-3.5 text-rose-400" />,
-      colorClass: 'bg-[var(--tl-surface-glass)] text-rose-300 border-rose-500/40'
-    }
   };
-  const platformBadge = platformBadges[site] ?? {
+  const caps = getSourceCapabilities(site);
+  const isHubReviewOutOfScope = caps.archetype === 'gallery_catalog' || caps.archetype === 'forum_board';
+  const hasDynamicEntityBadge = isHubReviewOutOfScope || caps.archetype === 'video_portal';
+  const dynamicLabel = getDynamicSourceLabel(site);
+  const dynamicEntitySuffix =
+    creator.entityKind === 'tag'
+      ? 'Tag'
+      : creator.entityKind === 'channel'
+        ? (isEn ? 'Channel' : 'Canal')
+        : creator.entityKind === 'category'
+          ? (isEn ? 'Category' : 'Categoria')
+          : creator.entityKind === 'thread'
+            ? (isEn ? 'Thread' : 'Tópico')
+            : creator.entityKind === 'subforum'
+              ? (isEn ? 'Subforum' : 'Subfórum')
+              : caps.archetype === 'forum_board'
+                ? 'Uploader'
+                : caps.archetype === 'video_portal'
+                  ? (isEn ? 'Creator' : 'Criador')
+                  : (isEn ? 'Artist' : 'Artista');
+  const dynamicBadge = hasDynamicEntityBadge
+    ? {
+        label: dynamicLabel ? `${dynamicLabel} ${dynamicEntitySuffix}` : dynamicEntitySuffix,
+        icon: <Globe className="w-3.5 h-3.5 text-[var(--tl-accent-text)]" />,
+        colorClass: 'bg-[var(--tl-surface-glass)] text-[var(--tl-accent-text)] border-[var(--tl-accent-border)]',
+      }
+    : null;
+  const platformBadge = platformBadges[site] ?? dynamicBadge ?? {
     label: isEn ? 'Creator' : 'Criador',
     icon: <Globe className="w-3.5 h-3.5 text-[var(--tl-accent-text)]" />,
     colorClass: 'bg-[var(--tl-surface-glass)] text-[var(--tl-accent-text)] border-[var(--tl-accent-border)]'
@@ -128,11 +146,13 @@ export const AdaptiveProfileHeader: React.FC<AdaptiveProfileHeaderProps> = ({
     }
   };
   const candidates: Array<{ label: string; raw: string | number | undefined; hideWhenZero?: boolean; highlight?: string }> = [
-    { label: 'POSTS', raw: stats.posts },
-    { label: isEn ? 'VIDEOS' : 'VÍDEOS', raw: stats.videos },
-    { label: isEn ? 'ALBUMS' : 'ÁLBUNS', raw: stats.albums, hideWhenZero: true },
+    { label: 'POSTS', raw: stats.posts, hideWhenZero: isHubReviewOutOfScope },
+    ...(caps.supportsVideosTab || (typeof stats.videos === 'number' && stats.videos > 0)
+      ? [{ label: isEn ? 'VIDEOS' : 'VÍDEOS', raw: stats.videos, hideWhenZero: !caps.supportsVideosTab }]
+      : []),
+    { label: isEn ? 'ALBUMS' : 'ÁLBUNS', raw: stats.albums, hideWhenZero: !isHubReviewOutOfScope },
     { label: 'GIFs', raw: stats.gifs, hideWhenZero: true },
-    { label: isEn ? 'LIKES' : 'CURTIDAS', raw: stats.likes, highlight: 'text-rose-400' },
+    ...(caps.supportsSourceLikes ? [{ label: isEn ? 'LIKES' : 'CURTIDAS', raw: stats.likes, highlight: 'text-rose-400' }] : []),
     { label: isEn ? 'SUBSCRIBERS' : 'INSCRITOS', raw: stats.subscribers ?? stats.followers, highlight: 'text-[var(--tl-accent-text)]' },
     { label: isEn ? 'VIEWS' : 'VISUALIZAÇÕES', raw: stats.views },
   ];
@@ -269,16 +289,32 @@ export const AdaptiveProfileHeader: React.FC<AdaptiveProfileHeaderProps> = ({
               )}
             </button>
 
-            <button
-              type="button"
-              data-action="open-profile-in-hub"
-              onClick={handleOpenInHub}
-              aria-label={openInHubLabel}
-              className="group/hub cute-press p-2 rounded-xl bg-[var(--tl-surface-elevated)] border border-[var(--tl-border)] text-[var(--tl-text-secondary)] hover:text-[var(--tl-text-primary)] hover:bg-[var(--tl-surface-hover)] transition-colors"
-              title={openInHubLabel}
-            >
-              <FolderPlus className="w-4 h-4 transition-transform duration-200 group-hover/hub:-rotate-6 group-hover/hub:-translate-y-0.5 motion-reduce:transform-none" />
-            </button>
+            {isHubReviewOutOfScope ? (
+              creator.profileUrl && (
+                <a
+                  href={creator.profileUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-action="open-source-page"
+                  aria-label={isEn ? 'Open Source Page' : 'Abrir na fonte'}
+                  title={isEn ? 'Open Source Page' : 'Abrir na fonte'}
+                  className="cute-press p-2 rounded-xl bg-[var(--tl-surface-elevated)] border border-[var(--tl-border)] text-[var(--tl-text-secondary)] hover:text-[var(--tl-text-primary)] hover:bg-[var(--tl-surface-hover)] transition-colors"
+                >
+                  <Globe className="w-4 h-4" />
+                </a>
+              )
+            ) : (
+              <button
+                type="button"
+                data-action="open-profile-in-hub"
+                onClick={handleOpenInHub}
+                aria-label={openInHubLabel}
+                className="group/hub cute-press p-2 rounded-xl bg-[var(--tl-surface-elevated)] border border-[var(--tl-border)] text-[var(--tl-text-secondary)] hover:text-[var(--tl-text-primary)] hover:bg-[var(--tl-surface-hover)] transition-colors"
+                title={openInHubLabel}
+              >
+                <FolderPlus className="w-4 h-4 transition-transform duration-200 group-hover/hub:-rotate-6 group-hover/hub:-translate-y-0.5 motion-reduce:transform-none" />
+              </button>
+            )}
 
             <button
               onClick={handleShare}

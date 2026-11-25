@@ -479,8 +479,8 @@ class BrowserTools:
                 }
             });
 
-            // 3. Video Iframes (YouTube, Vimeo, Twitter, Streamable, etc.)
-            const embedDomains = ['youtube.com/embed', 'player.vimeo.com', 'streamable.com', 'dailymotion.com/embed', 'redgifs.com/ifr', 'gfycat.com/ifr'];
+            // 3. Video Iframes (YouTube, Vimeo, Streamable, Dailymotion, etc.)
+            const embedDomains = ['youtube.com/embed', 'player.vimeo.com', 'streamable.com', 'dailymotion.com/embed'];
             document.querySelectorAll('iframe[src]').forEach((iframe, idx) => {
                 const src = iframe.src;
                 if (src && embedDomains.some(d => src.includes(d)) && !seenUrls.has(src)) {

@@ -47,6 +47,34 @@ The icon service reads a bounded prefix of large pages, resolves HTML base URLs
 and validates HTTPS with the maintained CA bundle plus system trust roots;
 discovery stays source-agnostic.
 
+## Unified Timeline
+
+The Timeline opens with all available sources together. A compact source rail
+uses the source names and icons. The mode bar uses text and an underline, with
+the selection announced to assistive technology. At narrow widths, both bars
+can scroll horizontally and keep 44 px touch targets.
+
+The main feed caps its single column at 704 px and limits continuous post text
+to 64 characters per line. Live, catalog and imported posts share an author,
+source and date header. Actions use the post footer or the existing overflow
+and media controls. Conversation excerpts use an inset panel. Photos, carousel
+slides and live video previews reserve a 16:9 frame before loading, with
+original brightness and a contained fit. The workspace uses the existing
+Timeline theme tokens and the app shell owns scrolling.
+
+Live feeds can offer recommended posts, followed posts or account lists when
+their connector exposes those capabilities. Catalog feeds group the media
+formats they expose and can order by published view counts. Media-only views
+use a two-column grid when there is room. Account links use the configured
+destination when an in-app feed is unavailable.
+
+Author profiles open in the same workspace. Returning from a live profile
+restores focus and keeps the author control at its previous viewport position.
+Initial loading and empty views use an in-list panel. Pagination announces
+loading and failures at the end of the list while keeping loaded posts visible.
+A batch from X with no new items pauses automatic paging and retains the
+existing manual load-more action, since X does not confirm a final page.
+
 ## Saved directories — approved additive integration, 04/11/2026
 
 After the first delivery was rejected for visual divergence, the real component
@@ -117,6 +145,9 @@ The optional `hub-violet` theme uses the Profile Hub plum/violet palette through
 with the original palettes as fallbacks, including opacity modifiers. Glass
 surfaces inherit the new theme in the shell and portals. Status colors retain
 their semantic palettes. The existing settings preference persists this theme.
+
+Explore and its dialogs follow the selected preset for surfaces, text, borders
+and actions. The plum hero gradient belongs to Hub Violet.
 
 Hub home aligns navigation, hero, URL entry and quick favorites to the existing
 1900px content width. Quick favorites use sibling native open/remove buttons,
@@ -297,8 +328,8 @@ must not issue bespoke profile fetches or inline custom fallback `<img>`
 pipelines for profile avatars.
 
 Resolved images render smoothly from `avatarIdentityKey` (stripping `www.`/`m.`
-and trailing `/` while preserving path case for provider IDs such as YouTube
-channels, distinct from `profileShortcutIdentity`), fall back automatically
+and trailing `/` while preserving case-sensitive path identifiers, distinct
+from `profileShortcutIdentity`), fall back automatically
 through `/api/proxy-image` when third-party CDNs block direct hotlinking, keep
 clean initial monograms when providers report `confirmed_empty: true` (default
 silhouettes excluded by the backend extractor), defer off-screen comment/list

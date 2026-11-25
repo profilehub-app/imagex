@@ -20,12 +20,12 @@ _slots=asyncio.Semaphore(6)
 # Bound queued source reads; sharing applies only while work is in flight, never
 # a stale result cache. Details and related request the same watch document.
 MAX_PENDING_WATCH_READS=32
-PROFILE_AUDIENCE_TIMEOUT_SECONDS=4
+PROFILE_AUDIENCE_TIMEOUT_SECONDS=6
 
 
-class _EpornerAudienceProfile:
-    """Restrict redirects to the uploader profile already declared by the video."""
-    adapter_id='eporner-audience'
+class _WatchAuthorProfileAdapter:
+    """Generic redirect guard restricted to the uploader profile declared by the video."""
+    adapter_id='watch-author-profile'
 
     def __init__(self, url):
         self.url=url
@@ -40,43 +40,33 @@ class _EpornerAudienceProfile:
         return safe.rstrip('/')+'/'
 
 
-class _XhamsterAudienceProfile(_EpornerAudienceProfile):
-    adapter_id='xhamster-audience'
-
-
-async def _enrich_xhamster_audience(details):
+async def _enrich_watch_audience(source, details):
+    """Universal, source-agnostic profile audience enrichment for any video source."""
+    if not isinstance(details, dict):
+        return
     if details.get('audience_count_text') or not details.get('author_url'):
         return
     from .profile_directory_transport import fetch_source_html_shared
-    from .profile_hub_watch_sources import xhamster_profile_audience
+    from .profile_hub_watch_sources import extract_generic_profile_audience, format_audience_label
     try:
-        adapter = _XhamsterAudienceProfile(details['author_url'])
-        async with asyncio.timeout(PROFILE_AUDIENCE_TIMEOUT_SECONDS):
-            final, html = await fetch_source_html_shared(adapter, adapter.identity)
-            audience = await asyncio.to_thread(xhamster_profile_audience, html, final, adapter)
-        if audience is not None:
-            details['audience_count_text'] = audience
-            details['audience_kind'] = 'subscribers'
-    except Exception:
-        # Optional profile statistics must not replace usable video details.
-        pass
-
-
-async def _enrich_eporner_audience(details):
-    if details.get('audience_count_text') or not details.get('author_url'):
-        return
-    from .profile_directory_transport import fetch_source_html_shared
-    from .profile_hub_watch_sources import eporner_profile_audience
-    try:
-        adapter=_EpornerAudienceProfile(details['author_url'])
+        adapter=_WatchAuthorProfileAdapter(details['author_url'])
         async with asyncio.timeout(PROFILE_AUDIENCE_TIMEOUT_SECONDS):
             final,html=await fetch_source_html_shared(adapter,adapter.identity)
-            audience=await asyncio.to_thread(eporner_profile_audience,html,final,adapter)
-        if audience:
-            details['audience_count_text']=f'{audience} subscribers'
-            details['audience_kind']='subscribers'
+            audience_text,audience_kind=(None,None)
+            extractor=getattr(source,'extract_profile_audience',None)
+            if callable(extractor):
+                audience_text,audience_kind=await asyncio.to_thread(extractor,html,final,adapter)
+            if not audience_text:
+                audience_text,audience_kind=await asyncio.to_thread(
+                    extract_generic_profile_audience,html,final,adapter
+                )
+        if audience_text:
+            formatted,resolved_kind=format_audience_label(audience_text,audience_kind or 'subscribers')
+            if formatted and resolved_kind:
+                details['audience_count_text']=formatted
+                details['audience_kind']=resolved_kind
     except Exception:
-        # Profile lookup is optional; retain the usable watch response.
+        # Optional profile statistics must not replace usable video details.
         pass
 
 
@@ -103,10 +93,7 @@ async def _read_watch_data(url):
                 from .profile_directory_transport import fetch_source_html_shared
                 final,html=await fetch_source_html_shared(source,source.watch_fetch_url())
                 data=await asyncio.to_thread(html_watch_data,source,html,final)
-                if source.id=='eporner':
-                    await _enrich_eporner_audience(data['details'])
-                elif source.id=='xhamster':
-                    await _enrich_xhamster_audience(data['details'])
+                await _enrich_watch_audience(source,data.get('details'))
                 return data
             from .profile_hub_execution_runtime import PublicHTTPSHttpxTransport
             from .profile_directory_transport import DEFAULT_TRANSPORT_HEADERS
@@ -114,7 +101,9 @@ async def _read_watch_data(url):
             async with httpx.AsyncClient(transport=PublicHTTPSHttpxTransport(),follow_redirects=False,timeout=WATCH_REQUEST_SECONDS,
                     headers={**DEFAULT_TRANSPORT_HEADERS,'Accept-Encoding':'identity'}) as client:
                 html=await _read_source(client,canonical)
-            return await asyncio.to_thread(youtube_watch_data,video_id,html)
+            data=await asyncio.to_thread(youtube_watch_data,video_id,html)
+            await _enrich_watch_audience(None,data.get('details'))
+            return data
     except (TimeoutError,httpx.TimeoutException) as exc:raise HTTPException(504,detail={'code':'watch_timeout'}) from exc
     except Exception as exc:
         if getattr(exc,'status',None)==504:
@@ -154,13 +143,16 @@ async def get_related_videos(url:str=Query(min_length=1,max_length=4096)):
 @router.get('/video-details')
 async def get_video_details(url:str=Query(min_length=1,max_length=4096)):
     data=await read_watch_data(url)
-    fields={key:None for key in ('title','description','author_name','author_url','author_avatar_url','audience_count_text','audience_kind','reaction_kind','like_count','dislike_count','comment_count')}
+    fields={key:None for key in ('title','description','author_name','author_url','author_avatar_url','audience_count_text','audience_kind','reaction_kind','like_count','dislike_count','comment_count','upload_date','view_count_text')}
     fields['artists']=[]
+    fields['tags']=[]
+    fields['categories']=[]
     return {'status':'unsupported' if data is None else 'ready','source_url':https_url(url),**(data['details'] if data is not None else fields)}
 
 
 @router.get('/comments-page')
 async def get_comments_page(url:str=Query(min_length=1,max_length=4096),cursor:str|None=Query(default=None,max_length=256),
-        parent_id:str|None=Query(default=None,min_length=1,max_length=512)):
+        parent_id:str|None=Query(default=None,min_length=1,max_length=512),
+        sort:str|None=Query(default=None,pattern='^(popular|newest)$')):
     from .profile_hub_comment_pages import read_comments_page
-    return await read_comments_page(url,cursor,parent_id)
+    return await read_comments_page(url,cursor,parent_id,sort=sort)

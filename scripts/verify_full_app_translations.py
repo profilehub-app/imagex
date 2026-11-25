@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IMAGEX.AI - Comprehensive Translation Verification & Line-by-Line Scanner
+IMAGEX - Comprehensive Translation Verification & Line-by-Line Scanner
 Scans all lines of all code files in the repository and verifies English translation coverage.
 """
 import os
@@ -109,7 +109,7 @@ def scan_file(fpath, pt_dict, en_dict):
 
 def run_audit(root_dir='.'):
     print("=" * 70)
-    print("      IMAGEX.AI - SYSTEMIC TRANSLATION & LOCALIZATION AUDIT")
+    print("      IMAGEX - SYSTEMIC TRANSLATION & LOCALIZATION AUDIT")
     print("=" * 70)
 
     pt_dict, en_dict = load_translations()

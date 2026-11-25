@@ -1,7 +1,7 @@
 """Read-only source comments, isolated from library and application startup.
 
 YouTube's installed yt-dlp parser owns continuation and reply interpretation;
-HTML adapters own Eporner/Pornhub video-page parsing. Network requests use the
+HTML adapters own generic video-page parsing. Network requests use the
 existing public/DNS-pinned transport; no media extraction, disk cache, browser
 cookies or comment publication occurs.
 """
@@ -79,7 +79,7 @@ async def _read_source(client,url,*,data=None,headers=None):
 
 def _group_comments(records,source_url=None):
     """Attach replies by source IDs only. Never guess parents or invent totals."""
-    from .profile_hub_comment_sources import source_author_url,source_comment_reactions
+    from .profile_hub_comment_sources import sanitize_comment_text,source_author_url,source_comment_reactions
     comments={};parents={};roots=[]
     for item in records:
         if not isinstance(item,dict):continue
@@ -91,9 +91,11 @@ def _group_comments(records,source_url=None):
         avatar=item.get('author_thumbnail')
         try:avatar=https_url(avatar) if isinstance(avatar,str) and avatar else ''
         except ValueError:avatar=''
-        entry={'id':identity,'author':item.get('author') if isinstance(item.get('author'),str) else '',
+        clean_author=sanitize_comment_text(item.get('author'),preserve_newlines=False) if isinstance(item.get('author'),str) else ''
+        clean_time=sanitize_comment_text(item.get('_time_text'),preserve_newlines=False) if isinstance(item.get('_time_text'),str) else ''
+        entry={'id':identity,'author':clean_author,
             'author_url':source_author_url(item,source_url),
-            'avatar':avatar,'text':text,'time':item.get('_time_text') if isinstance(item.get('_time_text'),str) else '',
+            'avatar':avatar,'text':sanitize_comment_text(text),'time':clean_time,
             'likes':likes,'reactions':source_comment_reactions(item),'replies':[]}
         if item.get('hidden'):
             entry['hidden']=True
