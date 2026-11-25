@@ -96,6 +96,8 @@ test('website HTML and CSS satisfy modern-web-guidance and structural contracts'
   assert.match(css, /\.hero-grid\s*>\s*\*\s*\{[^}]*min-width:\s*0;/);
   assert.match(css, /\.preview-shell\s*\{[^}]*min-width:\s*0;/);
   assert.match(css, /\.inline-link\s*\{/);
+  assert.match(css, /\[role="tab"\][\s\S]*?font-size:\s*0\.78rem;/);
+  assert.match(css, /@media\s*\(min-width:\s*1024px\)/);
   assert.match(css, /\[aria-selected="true"\]::after/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
 });
