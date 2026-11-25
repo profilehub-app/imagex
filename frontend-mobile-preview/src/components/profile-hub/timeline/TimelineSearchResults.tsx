@@ -609,6 +609,7 @@ export const TimelineSearchResults: React.FC<TimelineSearchResultsProps> = ({
         onOpenThread={onOpenThread}
         onOpenComments={() => onOpenComments(post)}
         onOpenLightbox={onOpenLightbox}
+        onOpenGallery={onOpenGallery}
         onOpenVideo={onOpenVideo}
         onOpenPlaylist={onOpenPlaylist}
       />

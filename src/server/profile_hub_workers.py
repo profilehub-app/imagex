@@ -19,6 +19,7 @@ import os
 import re
 import threading
 from typing import Any
+from src.server.connector_registry import native_adapter_host, native_adapter_matches
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from selectolax.lexbor import LexborHTMLParser
@@ -1176,6 +1177,8 @@ def extract_youtube_root_lexbor(source_url: str, html: str | LexborHTMLParser):
 # ============================================================================
 
 def is_portal_tube_host(url: str) -> bool:
+    if native_adapter_matches("portal_tube", url):
+        return True
     host = urlsplit(url).netloc.lower()
     return bool(re.search(r"(?:^|\.)portal_tube\.[a-z.]+$", host))
 
@@ -1195,6 +1198,12 @@ def is_portal_tube_profile_url(url: str) -> bool:
 def normalize_portal_tube_profile_base_url(url: str) -> str:
     """Normalize language subdomains (e.g. pt.portal-tube.example -> www.portal-tube.example) and strip subpaths."""
     u = re.sub(r"^https?://(?:[a-z]{2})\.(portal_tube\.[a-z.]+)", r"https://www.\1", url.strip(), flags=re.I)
+    configured = urlsplit(u)
+    if native_adapter_matches("portal_tube", u):
+        original_host = configured.hostname or ""
+        canonical = native_adapter_host("portal_tube", original_host)
+        if original_host == canonical.removeprefix("www.") or (original_host.endswith("." + canonical.removeprefix("www.")) and original_host != canonical):
+            u = urlunsplit(("https", canonical, configured.path, configured.query, configured.fragment))
     parsed = urlsplit(u)
     m = re.match(r"^/(pornstar|model|channels|users)/([a-zA-Z0-9_\-]+)", parsed.path, re.I)
     if m:
@@ -1965,6 +1974,8 @@ def extract_portal_tube_root_lexbor(source_url: str, html: str | LexborHTMLParse
 # ============================================================================
 
 def is_portal_state_host(url: str) -> bool:
+    if native_adapter_matches("portal_state", url):
+        return True
     host = urlsplit(url).netloc.lower()
     return bool(re.search(r"(?:^|\.)(portal_state|portal_state_cdn|xhday|xhvideotop|portal_statelive|portal_state\d*)\.[a-z.]+$", host))
 
@@ -1984,6 +1995,12 @@ def is_portal_state_profile_url(url: str) -> bool:
 def normalize_portal_state_profile_base_url(url: str) -> str:
     """Normalize language subdomains (e.g. pt.portal-state.example -> portal-state.example) and strip subpaths."""
     u = re.sub(r"^https?://(?:[a-z]{2,3})\.(portal_state\.[a-z.]+)", r"https://\1", url.strip(), flags=re.I)
+    configured = urlsplit(u)
+    if native_adapter_matches("portal_state", u):
+        original_host = configured.hostname or ""
+        canonical = native_adapter_host("portal_state", original_host)
+        if original_host == canonical.removeprefix("www.") or (original_host.endswith("." + canonical.removeprefix("www.")) and original_host != canonical):
+            u = urlunsplit(("https", canonical, configured.path, configured.query, configured.fragment))
     parsed = urlsplit(u)
     m = re.match(r"^/(pornstars|channels|creators|users)/([a-zA-Z0-9_\-]+)", parsed.path, re.I)
     if m:
@@ -3438,14 +3455,18 @@ def parse_album_page_lexbor(html: str | LexborHTMLParser, final_url: str) -> dic
                 if isinstance(_cat_conn, CatalogDescriptor) and _cat_conn.selectors.get("galleryMeta")
                 else ".content-categories a[href], .gallery-info a[href], #gallery-info a[href], .tags a[href], .models a[href]"
             )
+            artist_prefs = tuple(_cat_conn.selectors.get("artistPrefixes") or ()) if isinstance(_cat_conn, CatalogDescriptor) else ()
+            channel_prefs = tuple(_cat_conn.selectors.get("channelPrefixes") or ()) if isinstance(_cat_conn, CatalogDescriptor) else ()
+            tag_ignore_paths = set(str(p).lower() for p in (_cat_conn.selectors.get("tagIgnorePaths") or ())) if isinstance(_cat_conn, CatalogDescriptor) else set()
+            album_seg = str(_cat_conn.browse.get("albumPathSegment") or "").lower() if isinstance(_cat_conn, CatalogDescriptor) else ""
             for info_a in tree.css(meta_sel):
                 label = (info_a.text(strip=True) or "").strip()
                 link_href = http_url(final_url, info_a.attributes.get("href") or "")
                 if not label or not link_href:
                     continue
                 low_href = urlsplit(link_href).path.lower()
-                artist_prefs = tuple(_cat_conn.selectors.get("artistPrefixes") or ()) if isinstance(_cat_conn, CatalogDescriptor) else ()
-                channel_prefs = tuple(_cat_conn.selectors.get("channelPrefixes") or ()) if isinstance(_cat_conn, CatalogDescriptor) else ()
+                if low_href in tag_ignore_paths or (album_seg and album_seg in low_href):
+                    continue
                 if "/artists/" in low_href or "/models/" in low_href or "/pornstars/" in low_href or any(p in low_href for p in artist_prefs):
                     if label not in models:
                         models.append(label)

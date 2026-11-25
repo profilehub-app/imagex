@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   Bookmark,
@@ -22,7 +22,10 @@ import {
   EditorialGalleryCard,
   ForumThreadRow,
 } from './AdaptiveSourceCards';
-import { useProfileTimelineStore } from '../../../store/useProfileTimelineStore';
+import {
+  applyCatalogEnrichmentToPost,
+  useProfileTimelineStore,
+} from '../../../store/useProfileTimelineStore';
 import {
   profileShortcutIdentity,
   useProfileDirectoryLibraryStore,
@@ -69,6 +72,8 @@ export const CatalogEntityView: React.FC<CatalogEntityViewProps> = ({
 }) => {
   const addNotification = useAppStore((s) => s.addNotification);
   const toggleFollowCreator = useProfileTimelineStore((s) => s.toggleFollowCreator);
+  const enrichedCatalogByUrl = useProfileTimelineStore((s) => s.enrichedCatalogByUrl);
+  const queueCatalogEnrichment = useProfileTimelineStore((s) => s.queueCatalogEnrichment);
   const favorites = useProfileDirectoryLibraryStore((s) => s.favorites);
 
   const site = resolveTimelinePlatform(creator.profileUrl, creator.site) || '';
@@ -109,8 +114,36 @@ export const CatalogEntityView: React.FC<CatalogEntityViewProps> = ({
     return entityPosts;
   }, [entityPosts, gifPosts, activeSubTab, isForumEntity]);
 
-  const renderedPosts = filteredPosts.slice(0, visibleCount);
+  const renderedPosts = useMemo(
+    () =>
+      filteredPosts.slice(0, visibleCount).map((post) => {
+        const key = post.originalUrl || post.albumUrl || '';
+        const meta = (key && enrichedCatalogByUrl[key]) || (post.albumUrl && enrichedCatalogByUrl[post.albumUrl]) || undefined;
+        return applyCatalogEnrichmentToPost(post, meta);
+      }),
+    [filteredPosts, visibleCount, enrichedCatalogByUrl]
+  );
   const hasMoreLocal = renderedPosts.length < filteredPosts.length;
+
+  useEffect(() => {
+    if (caps.archetype !== 'gallery_catalog') return;
+    const candidates = renderedPosts
+      .filter((p) => {
+        const hasUrl = Boolean(p.originalUrl || p.albumUrl);
+        if (!hasUrl) return false;
+        const needsPhotoHydration =
+          p.photoCount == null || (Array.isArray(p.photos) ? p.photos.length <= 1 : true);
+        return Boolean(p.needsEnrichment || needsPhotoHydration || /^\d+$/.test((p.title || '').trim()));
+      })
+      .map((p) => ({
+        url: String(p.originalUrl || p.albumUrl || ''),
+        source: String(p.source || site || 'generic'),
+      }))
+      .filter((c) => Boolean(c.url));
+    if (candidates.length > 0) {
+      void queueCatalogEnrichment(candidates);
+    }
+  }, [caps.archetype, renderedPosts, site, queueCatalogEnrichment]);
 
   const entityKindLabel =
     entityKind === 'category' ? (isEn ? 'Category' : 'Categoria')

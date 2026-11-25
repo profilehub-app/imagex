@@ -207,3 +207,58 @@ def test_integrated_sources_api_and_opt_in_gating(tmp_path: Path, monkeypatch):
     assert res_reset.status_code == 200
     assert res_reset.json()["sources"] == []
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_id, route", [
+    ("portal_grid", "/profile/sample/"),
+    ("portal_tube", "/model/sample/"),
+    ("portal_state", "/users/sample/"),
+])
+async def test_configured_adapter_connects_profiles_and_search(tmp_path, monkeypatch, adapter_id, route):
+    import httpx
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.server import integrated_sources_service, profile_favorites_service
+    from src.server.profile_hub_providers import resolve_provider
+    from src.server.profile_hub_recent import recent_source
+    from src.server.timeline_omni_service import router
+    from src.server.timeline_search_providers import get_search_provider
+
+    config_file = tmp_path / "connectors.local.json"
+    config_file.with_name("connectors.adapters.local.json").write_text(json.dumps({"nativeAdapters": [{
+        "id": adapter_id,
+        "displayName": "Sample Media",
+        "originUrl": "https://media.example",
+        "domains": ["media.example"],
+        "aliases": ["previous_connector_id"],
+        "profilePaths": [route.rstrip("/") + "/?"],
+    }]}), encoding="utf-8")
+    monkeypatch.setenv("IMAGEX_CONNECTORS_FILE", str(config_file))
+    monkeypatch.setenv("IMAGEX_BUNDLED_CONNECTORS_FILE", str(tmp_path / "empty.json"))
+    monkeypatch.setenv("IMAGEX_INTEGRATED_SOURCES_FILE", str(tmp_path / "integrated_sources.json"))
+    monkeypatch.setattr(profile_favorites_service, "FAVORITES_FILE", tmp_path / "favorites.json")
+
+    profile_url = "https://media.example" + route
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        result = client.post("/api/profile-hub/timeline/integrate-url", json={"url": profile_url}).json()
+        assert result["integration"]["sourceId"] == adapter_id
+        assert result["integration"]["level"] == "profile"
+        descriptors = client.get("/api/profile-hub/timeline/search-sources?integrated_only=true").json()["sources"]
+    assert [(row["id"], row["origins"]) for row in descriptors] == [(adapter_id, ["https://media.example"])]
+    assert recent_source(profile_url) == adapter_id
+    assert resolve_provider(profile_url).provider_id == adapter_id
+    assert not integrated_sources_service.resolve_integration_url("https://media.example.unrelated.example" + route)["supported"]
+    assert integrated_sources_service._normalize_source_record({"id": "previous_connector_id"})["id"] == adapter_id
+
+    requests = []
+
+    def transport(request):
+        requests.append(request.url.host)
+        return httpx.Response(200, text="<html><body></body></html>")
+
+    provider = get_search_provider("previous_connector_id")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        await provider.search(client, "fixture", "videos")
+    assert requests and set(requests) == {"media.example"}

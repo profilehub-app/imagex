@@ -905,6 +905,18 @@ export function mapScanResponseToTimelinePosts(
         ? a.previewImages
         : [];
     const albumPhotos = rawAlbumPhotos.filter((p: unknown): p is string => typeof p === 'string' && Boolean(p));
+    const rawPhotoItems = Array.isArray(a.photoItems)
+      ? (a.photoItems as Array<Record<string, unknown>>)
+          .filter((it) => it && typeof it.url === 'string' && Boolean((it.url as string).trim()))
+          .map((it, idx) => ({
+            id: typeof it.id === 'string' ? it.id : `alb-item-${idx}`,
+            url: String(it.url),
+            thumbnailUrl: typeof it.thumbnailUrl === 'string' && it.thumbnailUrl.trim() ? it.thumbnailUrl : String(it.url),
+            pageUrl: typeof it.pageUrl === 'string' ? it.pageUrl : albUrl || undefined,
+            sourcePage: typeof it.sourcePage === 'string' ? it.sourcePage : albUrl || undefined,
+            isResolvedOriginal: typeof it.isResolvedOriginal === 'boolean' ? it.isResolvedOriginal : undefined,
+          }))
+      : undefined;
 
     result.push({
       id: hintedId(albUrl,aliases) || `disc-alb-${creator.id}-${a.id || encodeURIComponent(albUrl)}`,
@@ -925,7 +937,13 @@ export function mapScanResponseToTimelinePosts(
       albumUrl: albUrl || undefined,
       thumbnail: cover,
       photos: albumPhotos.length > 0 ? albumPhotos : (cover ? [cover] : []),
+      photoItems: rawPhotoItems && rawPhotoItems.length > 0 ? rawPhotoItems : undefined,
       photoCount: count,
+      artists: normalizeEntityRefs(a.artists),
+      channels: normalizeEntityRefs(a.channels),
+      tags: Array.isArray(a.tags) ? a.tags.filter((t: unknown): t is string => typeof t === 'string') : undefined,
+      tagEntities: normalizeEntityRefs(a.tagEntities),
+      needsEnrichment: typeof a.needsEnrichment === 'boolean' ? a.needsEnrichment : undefined,
       title: a.title || creator.name,
       description: typeof a.description === 'string' && a.description.trim() ? a.description.trim() : undefined,
       views: a.views || undefined,

@@ -8,13 +8,14 @@ names or domains.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
 import re
 import sys
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from ..core import runtime_paths
 
@@ -278,10 +279,38 @@ class ImageHostRule:
 
 
 @dataclass(frozen=True)
+class NativeAdapter:
+    id: str
+    display_name: str
+    origin_url: str
+    canonical_host: str
+    domains: tuple[str, ...]
+    media_domains: tuple[str, ...]
+    aliases: tuple[str, ...]
+    profile_paths: tuple[re.Pattern[str], ...]
+    extractor: str
+
+    def matches_url(self, url: str, *, include_media: bool = False) -> bool:
+        try:
+            parts = urlsplit(url)
+            host = (parts.hostname or "").lower().rstrip(".")
+        except ValueError:
+            return False
+        return (
+            parts.scheme in {"http", "https"}
+            and parts.username is None
+            and parts.password is None
+            and any(host == domain or host.endswith("." + domain)
+                    for domain in (self.domains + self.media_domains if include_media else self.domains))
+        )
+
+
+@dataclass(frozen=True)
 class ConnectorBundle:
     catalogs: tuple[CatalogDescriptor, ...] = ()
     forums: tuple[ForumDescriptor, ...] = ()
     video_portals: tuple[VideoPortalDescriptor, ...] = ()
+    native_adapters: tuple[NativeAdapter, ...] = ()
     image_hosts: tuple[ImageHostRule, ...] = ()
 
 
@@ -291,6 +320,7 @@ _BUNDLE_CACHE: tuple[str, float, ConnectorBundle] | None = None
 def clear_connector_cache() -> None:
     global _BUNDLE_CACHE
     _BUNDLE_CACHE = None
+    _native_adapter_index.cache_clear()
 
 
 def _clean_host(host_or_url: str) -> str:
@@ -410,7 +440,8 @@ def _resolve_config_paths() -> list[Path]:
     bundled = get_bundled_connectors_path()
     if bundled is not None:
         candidates.append(bundled)
-    candidates.append(get_writable_connectors_path())
+    local_path = get_writable_connectors_path()
+    candidates.extend((local_path, local_path.with_name("connectors.adapters.local.json")))
     out: list[Path] = []
     seen: set[str] = set()
     for p in candidates:
@@ -425,7 +456,7 @@ def _resolve_config_paths() -> list[Path]:
     return out
 
 
-_MERGE_KEYS = ("catalogs", "forums", "imageHosts", "videoPortals")
+_MERGE_KEYS = ("catalogs", "forums", "imageHosts", "videoPortals", "nativeAdapters")
 
 
 def _merge_connector_payloads(payloads: list[dict[str, Any]]) -> dict[str, list[Any]]:
@@ -445,10 +476,93 @@ def _merge_connector_payloads(payloads: list[dict[str, Any]]) -> dict[str, list[
     return merged
 
 
+def _read_native_adapters(rows: list[Any]) -> tuple[NativeAdapter, ...]:
+    def strings(values: Any) -> tuple[str, ...]:
+        return tuple(value.strip() for value in values if isinstance(value, str) and value.strip()) if isinstance(values, list) else ()
+
+    def domains(values: Any) -> tuple[str, ...]:
+        return tuple(domain.strip(".").lower() for domain in strings(values)
+                     if re.fullmatch(r"[A-Za-z0-9.-]+", domain) and "." in domain.strip("."))
+
+    adapters = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("enabled") is False:
+            continue
+        source_id = str(row.get("id") or "").strip().lower()
+        origin_url = str(row.get("originUrl") or "").rstrip("/")
+        hostnames = domains(row.get("domains"))
+        canonical = str(row.get("canonicalHost") or "").lower()
+        try:
+            parts = urlsplit(origin_url)
+            if (not source_id or not hostnames or parts.scheme != "https" or parts.username is not None
+                    or parts.netloc != parts.hostname or parts.path or parts.query or parts.fragment
+                    or not any(parts.hostname == domain or parts.hostname.endswith("." + domain) for domain in hostnames)):
+                continue
+            if not canonical:
+                canonical = parts.hostname
+            if not any(canonical == domain or canonical.endswith("." + domain) for domain in hostnames):
+                continue
+            patterns = tuple(re.compile(value, re.I) for value in strings(row.get("profilePaths")))
+        except (ValueError, re.error):
+            continue
+        adapters.append(NativeAdapter(
+            id=source_id, display_name=str(row.get("displayName") or source_id), origin_url=origin_url,
+            canonical_host=canonical, domains=hostnames, media_domains=domains(row.get("mediaDomains")),
+            aliases=tuple(value.lower() for value in strings(row.get("aliases"))),
+            profile_paths=patterns, extractor=str(row.get("extractor") or ""),
+        ))
+    return tuple(adapters)
+
+
+@lru_cache(maxsize=8)
+def _native_adapter_index(local_override: str, bundled_override: str) -> dict[str, NativeAdapter]:
+    return {name: row for row in load_connector_bundle().native_adapters for name in (row.id, *row.aliases)}
+
+
+def get_native_adapter(source_id: str) -> NativeAdapter | None:
+    sid = (source_id or "").strip().lower()
+    return _native_adapter_index(
+        os.environ.get("IMAGEX_CONNECTORS_FILE", ""),
+        os.environ.get("IMAGEX_BUNDLED_CONNECTORS_FILE", ""),
+    ).get(sid)
+
+
+def native_adapter_for_url(url: str) -> NativeAdapter | None:
+    entries = _native_adapter_index(
+        os.environ.get("IMAGEX_CONNECTORS_FILE", ""),
+        os.environ.get("IMAGEX_BUNDLED_CONNECTORS_FILE", ""),
+    )
+    return next((row for sid, row in entries.items() if sid == row.id and row.matches_url(url)), None)
+
+
+def native_adapter_url(source_id: str, fallback_url: str) -> str:
+    row = get_native_adapter(source_id)
+    if row is None:
+        return fallback_url
+    original = urlsplit(fallback_url)
+    configured = urlsplit(row.origin_url)
+    return urlunsplit((configured.scheme, configured.netloc, original.path, original.query, original.fragment))
+
+
+def native_adapter_origin(source_id: str, fallback: str) -> str:
+    row = get_native_adapter(source_id)
+    return row.origin_url if row else fallback
+
+
+def native_adapter_host(source_id: str, fallback: str) -> str:
+    row = get_native_adapter(source_id)
+    return row.canonical_host if row else fallback
+
+
+def native_adapter_matches(source_id: str, url: str, *, include_media: bool = False) -> bool:
+    row = get_native_adapter(source_id)
+    return row is not None and row.matches_url(url, include_media=include_media)
+
+
 def load_connector_bundle(force_reload: bool = False) -> ConnectorBundle:
     global _BUNDLE_CACHE
     if force_reload:
-        _BUNDLE_CACHE = None
+        clear_connector_cache()
     paths = _resolve_config_paths()
     if not paths:
         return ConnectorBundle()
@@ -607,6 +721,7 @@ def load_connector_bundle(force_reload: bool = False) -> ConnectorBundle:
         catalogs=tuple(catalogs),
         forums=tuple(forums),
         video_portals=tuple(video_portals),
+        native_adapters=_read_native_adapters(payload.get("nativeAdapters") or []),
         image_hosts=tuple(hosts),
     )
     _BUNDLE_CACHE = (key, mtime, bundle)

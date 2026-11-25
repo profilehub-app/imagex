@@ -525,13 +525,41 @@ def extract_gallery_entity_metadata(
         else:
             tag_entities.append({"name": label, "url": href, "kind": "tag"})
 
-    # Count full-size gallery images if visible in scoped selectors (skip avatars/svg)
-    img_urls: set[str] = set()
+    # Extract full-size gallery images + thumbnails in DOM order (skip avatars/svg/chrome)
+    upgrade = descriptor.browse.get("thumbUpgrade")
+    photos: list[str] = []
+    photo_items: list[dict[str, Any]] = []
+    seen_img_urls: set[str] = set()
     for a in tree.css(img_sel):
-        u = _abs_http_url(page_url, a.attributes.get("href"))
-        u_path = urlsplit(u).path.lower() if u else ""
-        if u and _IMAGE_URL_RE.search(u_path) and "/models/" not in u_path and not u_path.endswith(".svg"):
-            img_urls.add(u)
+        if _is_inside_chrome_container(a):
+            continue
+        href_u = _abs_http_url(page_url, a.attributes.get("href"))
+        href_path = urlsplit(href_u).path.lower() if href_u else ""
+        if href_u and (
+            is_placeholder_media_url(href_u)
+            or "/models/" in href_path
+            or href_path.endswith(".svg")
+            or not _IMAGE_URL_RE.search(href_path)
+        ):
+            href_u = ""
+        img = a.css_first("img")
+        thumb_u = _pick_img_thumb(page_url, img.attributes) if img is not None else ""
+        thumb_path = urlsplit(thumb_u).path.lower() if thumb_u else ""
+        if thumb_u and ("/models/" in thumb_path or thumb_path.endswith(".svg")):
+            thumb_u = ""
+        full_u = href_u or (_upgrade_thumb(thumb_u, upgrade) if thumb_u and _IMAGE_URL_RE.search(thumb_path) else "")
+        if not full_u or full_u in seen_img_urls:
+            continue
+        seen_img_urls.add(full_u)
+        photos.append(full_u)
+        photo_items.append({
+            "id": f"photo-{hashlib.sha256(full_u.encode()).hexdigest()[:16]}",
+            "url": full_u,
+            "thumbnailUrl": thumb_u or full_u,
+            "pageUrl": page_url,
+            "sourcePage": page_url,
+            "isResolvedOriginal": True,
+        })
 
     h1 = tree.css_first("h1")
     title = (h1.text(strip=True) if h1 is not None else "") or humanize_slug_title(page_url, descriptor.display_name)
@@ -544,7 +572,9 @@ def extract_gallery_entity_metadata(
         "channels": channels,
         "tags": [t["name"] for t in tag_entities],
         "tagEntities": tag_entities,
-        "photoCount": len(img_urls) or None,
+        "photoCount": len(photos) or None,
+        "photos": photos,
+        "photoItems": photo_items,
     }
 
 
@@ -852,7 +882,7 @@ async def read_catalog_entity_profile(
     html = resp.text or ""
     tree = LexborHTMLParser(html)
 
-    h1 = tree.css_first("h1, title")
+    h1 = tree.css_first("h1") or tree.css_first("title")
     name = (name_hint or (h1.text(separator=" ", strip=True) if h1 is not None else "") or humanize_slug_title(final_url, descriptor.display_name)).strip()
     avatar_sel = str(descriptor.selectors.get("avatar") or ".model-info img, .channel-info img, .pornstar-info img, img.avatar")
     av_node = tree.css_first(avatar_sel)
@@ -893,7 +923,12 @@ async def read_catalog_entity_profile(
             "sourceSite": descriptor.id,
             "authorName": name,
             "authorUrl": final_url,
+            "needsEnrichment": bool(it.get("needsEnrichment", True)),
         }
+        if isinstance(it.get("photoCount"), int) and it["photoCount"] > 0:
+            rec["photoCount"] = it["photoCount"]
+        if isinstance(it.get("photos"), list) and it["photos"]:
+            rec["photos"] = it["photos"]
         if it["type"] == "gif":
             gifs.append(rec)
         else:

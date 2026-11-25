@@ -18,6 +18,7 @@ from .connector_registry import (
     ForumDescriptor,
     VideoPortalDescriptor,
     find_connector_for_url,
+    native_adapter_for_url,
 )
 from .profile_hub_execution import https_url
 
@@ -238,6 +239,19 @@ def resolve_provider(url: str | None) -> ProfileProviderSpec:
     for spec in _REGISTRY.values():
         if spec.matches_host(host):
             return spec
+    adapter = native_adapter_for_url(url)
+    if adapter is not None:
+        return ProfileProviderSpec(
+            provider_id=adapter.id, domains=adapter.domains, profile_path_patterns=adapter.profile_paths,
+            avatar_selectors=GENERIC_PROVIDER.avatar_selectors,
+            avatar_bg_selectors=GENERIC_PROVIDER.avatar_bg_selectors,
+            confirmed_no_avatar_selectors=GENERIC_PROVIDER.confirmed_no_avatar_selectors,
+            profile_meta_fallback_allowed=True,
+            max_html_bytes=GENERIC_PROVIDER.max_html_bytes,
+            video_identity_resolver=(
+                (lambda value: _extractor_video_id(adapter.extractor, value)) if adapter.extractor else match_ytdlp_video_id
+            ),
+        )
     conn = find_connector_for_url(url)
     if conn is not None:
         return _spec_from_connector(conn)

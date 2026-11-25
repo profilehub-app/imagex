@@ -132,10 +132,13 @@ def _normalize_source_record(raw: dict[str, Any]) -> dict[str, Any] | None:
     sid = str(raw.get("id") or raw.get("sourceId") or "").strip().lower()
     if not sid:
         return None
-    display_name = str(raw.get("displayName") or sid.title()).strip() or sid
-    origin_url = str(raw.get("originUrl") or f"https://{sid}.com").strip()
-    kind = str(raw.get("kind") or "builtin").strip() or "builtin"
-    domains = [str(d).strip().lower() for d in (raw.get("domains") or []) if str(d).strip()]
+    adapter = connector_registry.get_native_adapter(sid)
+    if adapter is not None:
+        sid = adapter.id
+    display_name = adapter.display_name if adapter else str(raw.get("displayName") or sid.title()).strip() or sid
+    origin_url = adapter.origin_url if adapter else str(raw.get("originUrl") or f"https://{sid}.com").strip()
+    kind = "builtin" if adapter else str(raw.get("kind") or "builtin").strip() or "builtin"
+    domains = list(adapter.domains) if adapter else [str(d).strip().lower() for d in (raw.get("domains") or []) if str(d).strip()]
     return {
         "id": sid,
         "displayName": display_name,
@@ -159,12 +162,25 @@ def _atomic_write_payload(path: Path, sources: list[dict[str, Any]]) -> None:
     tmp_path.replace(path)
 
 
+def _native_catalog_entry(adapter: connector_registry.NativeAdapter) -> dict[str, Any]:
+    return {
+        "id": adapter.id, "displayName": adapter.display_name, "originUrl": adapter.origin_url,
+        "domains": adapter.domains, "kind": "builtin", "iconKind": "connector",
+    }
+
+
 def _builtin_lookup() -> dict[str, dict[str, Any]]:
-    return {item["id"]: item for item in _BUILTIN_PLATFORMS}
+    return {
+        **{item["id"]: item for item in _BUILTIN_PLATFORMS},
+        **{row.id: _native_catalog_entry(row) for row in connector_registry.load_connector_bundle().native_adapters},
+    }
 
 
 def _find_catalog_entry(source_id: str) -> dict[str, Any] | None:
     sid = (source_id or "").strip().lower()
+    adapter = connector_registry.get_native_adapter(sid)
+    if adapter is not None:
+        return _native_catalog_entry(adapter)
     builtins = _builtin_lookup()
     if sid in builtins:
         return builtins[sid]
@@ -272,7 +288,7 @@ def get_integrated_source_ids() -> set[str]:
 def list_supported_integration_catalog() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for item in _BUILTIN_PLATFORMS:
+    for item in _builtin_lookup().values():
         seen.add(item["id"])
         out.append(
             {
@@ -395,6 +411,17 @@ def resolve_integration_url(raw_url: str) -> dict[str, Any]:
     parsed = urlparse(normalized)
     host = _clean_host(parsed.netloc)
 
+    adapter = connector_registry.native_adapter_for_url(normalized)
+    if adapter is not None:
+        level, handle = _extract_profile_hint(adapter.id, normalized)
+        if level == "network" and any(pattern.fullmatch(parsed.path) for pattern in adapter.profile_paths):
+            segments = [part for part in parsed.path.split("/") if part]
+            level, handle = "profile", ("@" + segments[1].lstrip("@")) if len(segments) > 1 else None
+        return {
+            **_native_catalog_entry(adapter), "ok": True, "matched": True, "supported": True,
+            "sourceId": adapter.id, "level": level, "targetUrl": normalized,
+            "suggestedHandle": handle,
+        }
     connector = connector_registry.find_connector_for_url(normalized)
     if connector is not None:
         level, handle = _extract_profile_hint(connector.id, normalized, connector=connector)

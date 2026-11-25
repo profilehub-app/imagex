@@ -1,4 +1,4 @@
-# ⚡ IMAGEX v5.8.1
+# ⚡ IMAGEX v5.8.2
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀🔍
 
@@ -6,13 +6,13 @@ Autonomous platform for intelligent extraction, organization, and inspection of 
 
 ---
 
-## ✨ What's new in v5.8.0
+## ✨ What's new in v5.8.2
 
-- Timeline brings together the sources you add and the local batches you select. New installations start with an empty feed.
-- Search, source controls and creator navigation are easier to reach on smaller screens.
-- Explore and its dialogs follow the selected app theme.
+- Catalog galleries open directly into the dedicated gallery view from cards and titles, with background hydration for full-resolution photos, counts, creator attribution, and structured tags across entity and timeline views.
+- Configurable native adapter descriptors are supported in local and bundled connector files while keeping workstation configuration separate.
 
-[Read the v5.8.1 release notes in English and Portuguese](docs/release-notes-v5.8.1.md).
+[Read the v5.8.2 release notes in English and Portuguese](docs/release-notes-v5.8.2.md).
+[Read the v5.8.1 release notes](docs/release-notes-v5.8.1.md).
 [Read the v5.8.0 release notes](docs/release-notes-v5.8.0.md).
 
 ---

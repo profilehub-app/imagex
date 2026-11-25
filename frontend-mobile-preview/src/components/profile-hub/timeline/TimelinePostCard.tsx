@@ -119,6 +119,7 @@ interface TimelinePostCardProps {
   isNextInQueue?: boolean;
   onOpenVideo?: (post: TimelinePost, handoff: TimelinePlaybackHandoff) => void | boolean;
   onOpenPlaylist?: (post: TimelinePost) => void;
+  onOpenGallery?: (post: TimelinePost) => void;
   watchPresentation?: boolean;
   playbackHandoff?: TimelinePlaybackHandoff;
   registerPlaybackSnapshot?: (snapshot: (() => TimelinePlaybackHandoff) | null) => void;
@@ -142,6 +143,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
   isNextInQueue = false,
   onOpenVideo,
   onOpenPlaylist,
+  onOpenGallery,
   watchPresentation = false,
   playbackHandoff,
   registerPlaybackSnapshot,
@@ -1343,6 +1345,25 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
     post.photoCount || 0,
     Array.isArray(post.photos) ? post.photos.length : 0
   );
+  const hasKnownPhotoCount = typeof post.photoCount === 'number' && post.photoCount > 0;
+  const showAlbumCountBadge = totalAlbumPhotos > 1 || (hasKnownPhotoCount && totalAlbumPhotos === 1);
+  const canOpenGalleryView = Boolean(
+    onOpenGallery && sourceCaps.archetype === 'gallery_catalog' && (post.albumUrl || post.originalUrl)
+  );
+  const openAlbumGalleryOrLightbox = (photoIndex: number) => {
+    if (canOpenGalleryView && onOpenGallery) {
+      onOpenGallery(post);
+      return;
+    }
+    onOpenLightbox(
+      effectiveAlbumPhotos,
+      photoIndex,
+      post.title,
+      post.albumUrl || post.originalUrl,
+      post.photoItems,
+      post.photoCount
+    );
+  };
   // Grids use the source thumbnail; only the lightbox receives original URLs.
   const effectiveAlbumPhotos = Array.isArray(post.photos) && post.photos.length > 0
     ? post.photos
@@ -1630,18 +1651,9 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
         <div className={`tl-post-media relative grid ${effectiveAlbumPhotos.length > 1 ? 'grid-cols-2' : 'grid-cols-1'} gap-1`}>
           <button
             type="button"
-            aria-label={isEn ? 'Open album photo 1' : 'Abrir foto 1 do álbum'}
+            aria-label={canOpenGalleryView ? (isEn ? `Open gallery ${post.title}` : `Abrir galeria ${post.title}`) : (isEn ? 'Open album photo 1' : 'Abrir foto 1 do álbum')}
             className="tl-post-frame relative cursor-pointer overflow-hidden"
-            onClick={() =>
-              onOpenLightbox(
-                effectiveAlbumPhotos,
-                0,
-                post.title,
-                post.albumUrl || post.originalUrl,
-                post.photoItems,
-                post.photoCount
-              )
-            }
+            onClick={() => openAlbumGalleryOrLightbox(0)}
           >
             <img
               src={albumGridUrls[0]}
@@ -1662,7 +1674,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
                 }
               }}
             />
-            {totalAlbumPhotos > 0 && (
+            {showAlbumCountBadge && (
               <span className="pointer-events-none absolute top-2 right-2 z-10 inline-flex items-center gap-1 rounded-full bg-black/75 px-2.5 py-0.5 font-mono text-[11px] font-bold text-white backdrop-blur-md">
                 {totalAlbumPhotos}
               </span>
@@ -1670,18 +1682,9 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
           </button>
           {effectiveAlbumPhotos.length > 1 && <button
             type="button"
-            aria-label={isEn ? 'Open album photo 2' : 'Abrir foto 2 do álbum'}
+            aria-label={canOpenGalleryView ? (isEn ? `Open gallery ${post.title}` : `Abrir galeria ${post.title}`) : (isEn ? 'Open album photo 2' : 'Abrir foto 2 do álbum')}
             className="tl-post-frame relative cursor-pointer overflow-hidden"
-            onClick={() =>
-              onOpenLightbox(
-                effectiveAlbumPhotos,
-                1,
-                post.title,
-                post.albumUrl || post.originalUrl,
-                post.photoItems,
-                post.photoCount
-              )
-            }
+            onClick={() => openAlbumGalleryOrLightbox(1)}
           >
             <img
               src={albumGridUrls[1]}
@@ -1750,7 +1753,7 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
                 <button
                   type="button"
                   className="min-h-11 rounded-xl bg-[var(--tl-accent)] px-3.5 py-2 text-xs font-bold text-[var(--tl-accent-contrast)] hover:bg-[var(--tl-accent-hover)]"
-                  onClick={() => onOpenLightbox([], 0, post.title, post.albumUrl || post.originalUrl, post.photoItems, post.photoCount)}
+                  onClick={() => openAlbumGalleryOrLightbox(0)}
                 >
                   {isEn ? 'Load Gallery' : 'Carregar Galeria'}
                 </button>
@@ -2117,9 +2120,23 @@ export const TimelinePostCard: React.FC<TimelinePostCardProps> = ({
 
       {!watchPresentation && <>
       {/* Título Limpo */}
-      {(!isSocial || (!socialText && !post.relation)) && <h4 className="tl-post-copy font-semibold line-clamp-2">
-        {post.title}
-      </h4>}
+      {(!isSocial || (!socialText && !post.relation)) && (
+        onOpenGallery && sourceCaps.archetype === 'gallery_catalog' && (post.albumUrl || post.originalUrl) ? (
+          <h4 className="tl-post-copy font-semibold line-clamp-2">
+            <button
+              type="button"
+              onClick={() => onOpenGallery(post)}
+              className="text-left hover:text-[var(--tl-accent-text)] transition-colors cursor-pointer"
+            >
+              {post.title}
+            </button>
+          </h4>
+        ) : (
+          <h4 className="tl-post-copy font-semibold line-clamp-2">
+            {post.title}
+          </h4>
+        )
+      )}
       {((Array.isArray(post.artists) && post.artists.length > 0)
         || (Array.isArray(post.channels) && post.channels.length > 0)
         || (Array.isArray(post.releaseSpecs) && post.releaseSpecs.length > 0)) && (

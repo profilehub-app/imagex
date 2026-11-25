@@ -15,6 +15,7 @@ import json
 import re
 import time
 from typing import Any, Literal, Protocol
+from src.server.connector_registry import native_adapter_url, get_native_adapter
 from urllib.parse import quote, quote_plus, unquote, urljoin, urlsplit
 
 import httpx
@@ -137,7 +138,9 @@ def list_search_providers() -> tuple[SearchProvider, ...]:
 
 def get_search_provider(source_id: str) -> SearchProvider | None:
     """Look up a single registered search provider by ID."""
-    return _dynamic_search_providers().get(str(source_id or "").strip().lower())
+    adapter = get_native_adapter(source_id)
+    sid = adapter.id if adapter else str(source_id or "").strip().lower()
+    return _dynamic_search_providers().get(sid)
 
 
 def encode_search_cursor(payload: dict[str, Any]) -> str:
@@ -808,7 +811,7 @@ def _portal_grid_playlist_creator(playlist_url: str) -> tuple[str, str]:
     if not username:
         return "", ""
     parts = urlsplit(playlist_url or "")
-    origin = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else "https://portal-grid.example"
+    origin = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else native_adapter_url("portal_grid", "https://portal-grid.example")
     return username, f"{origin}/profile/{username}/"
 
 
@@ -842,10 +845,10 @@ class PortalGridSearchProvider:
         cursor_data = decode_search_cursor(cursor)
         current_page = int(cursor_data.get("page") or 1)
         default_urls = {
-            "videos": f"https://portal-grid.example/search/{slug}/",
-            "profiles": f"https://portal-grid.example/search-pornstars/{slug}/",
-            "playlists": f"https://portal-grid.example/search-playlists/{slug}/",
-            "albums": f"https://portal-grid.example/search-photos/{slug}/",
+            "videos": native_adapter_url("portal_grid", f"https://portal-grid.example/search/{slug}/"),
+            "profiles": native_adapter_url("portal_grid", f"https://portal-grid.example/search-pornstars/{slug}/"),
+            "playlists": native_adapter_url("portal_grid", f"https://portal-grid.example/search-playlists/{slug}/"),
+            "albums": native_adapter_url("portal_grid", f"https://portal-grid.example/search-photos/{slug}/"),
         }
         target_url = str(cursor_data.get("url") or default_urls[category])
         try:
@@ -1076,8 +1079,8 @@ class PortalTubeSearchProvider:
             if category == "profiles":
                 ps_page = cursor_data.get("ps_page", 1) if cursor_data else 1
                 ch_page = cursor_data.get("ch_page", 1) if cursor_data else 1
-                ps_url = f"https://portal-tube.example/pornstars/search?search={q_enc}&page={ps_page}" if ps_page else None
-                ch_url = f"https://portal-tube.example/channels/search?channelSearch={q_enc}&page={ch_page}" if ch_page else None
+                ps_url = native_adapter_url("portal_tube", f"https://portal-tube.example/pornstars/search?search={q_enc}&page={ps_page}") if ps_page else None
+                ch_url = native_adapter_url("portal_tube", f"https://portal-tube.example/channels/search?channelSearch={q_enc}&page={ch_page}") if ch_page else None
                 tasks = []
                 if ps_url:
                     tasks.append(self._get_ph(client, ps_url))
@@ -1104,13 +1107,13 @@ class PortalTubeSearchProvider:
                             )
                             if not a:
                                 continue
-                            p_url = _http_url("https://portal-tube.example", a.attributes.get("href") or "")
+                            p_url = _http_url(native_adapter_url("portal_tube", "https://portal-tube.example"), a.attributes.get("href") or "")
                             if not p_url or p_url in seen_p:
                                 continue
                             seen_p.add(p_url)
                             img = li.css_first("img")
                             avatar = _http_url(
-                                "https://portal-tube.example",
+                                native_adapter_url("portal_tube", "https://portal-tube.example"),
                                 (img.attributes.get("data-thumb_url") or img.attributes.get("data-src") or img.attributes.get("src")) if img else "",
                             )
                             raw_a_name = a.text(strip=True)
@@ -1154,13 +1157,13 @@ class PortalTubeSearchProvider:
                             )
                             if not title_a:
                                 continue
-                            p_url = _http_url("https://portal-tube.example", title_a.attributes.get("href") or "")
+                            p_url = _http_url(native_adapter_url("portal_tube", "https://portal-tube.example"), title_a.attributes.get("href") or "")
                             if not p_url or "/channels/" not in p_url or p_url in seen_p:
                                 continue
                             seen_p.add(p_url)
                             img = wrapper.css_first("img")
                             avatar = _http_url(
-                                "https://portal-tube.example",
+                                native_adapter_url("portal_tube", "https://portal-tube.example"),
                                 (img.attributes.get("data-thumb_url") or img.attributes.get("data-src") or img.attributes.get("src")) if img else "",
                             )
                             raw_ch_name = title_a.text(strip=True)
@@ -1202,9 +1205,9 @@ class PortalTubeSearchProvider:
 
             page = int(cursor_data.get("page") or 1)
             route_map = {
-                "videos": f"https://portal-tube.example/video/search?search={q_enc}&page={page}",
-                "albums": f"https://portal-tube.example/albums?search={q_enc}&page={page}",
-                "gifs": f"https://portal-tube.example/gifs/search?search={q_enc}&page={page}",
+                "videos": native_adapter_url("portal_tube", f"https://portal-tube.example/video/search?search={q_enc}&page={page}"),
+                "albums": native_adapter_url("portal_tube", f"https://portal-tube.example/albums?search={q_enc}&page={page}"),
+                "gifs": native_adapter_url("portal_tube", f"https://portal-tube.example/gifs/search?search={q_enc}&page={page}"),
             }
             url = route_map[category]
             resp = await self._get_ph(client, url)
@@ -1222,12 +1225,12 @@ class PortalTubeSearchProvider:
                     u_a = li.css_first(".usernameWrap a[href], .videoUploaderBlock a[href]")
                     if u_a:
                         u_name = u_a.text(strip=True)
-                        u_href = _http_url("https://portal-tube.example", u_a.attributes.get("href") or "")
+                        u_href = _http_url(native_adapter_url("portal_tube", "https://portal-tube.example"), u_a.attributes.get("href") or "")
                         if u_name and vkey and u_href:
                             uploader_by_key[vkey] = (u_name, u_href)
                         thumb_a = li.css_first("a.linkVideoThumb[href], a[href*='viewkey=']")
                         if thumb_a and u_name:
-                            v_thumb_url = _http_url("https://portal-tube.example", thumb_a.attributes.get("href") or "")
+                            v_thumb_url = _http_url(native_adapter_url("portal_tube", "https://portal-tube.example"), thumb_a.attributes.get("href") or "")
                             if v_thumb_url:
                                 uploader_by_key[v_thumb_url] = (u_name, u_href)
 
@@ -1318,7 +1321,7 @@ class PortalTubeSearchProvider:
                 video_proxy = (
                     stream_src
                     if stream_src.startswith("/api/")
-                    else f"/api/proxy-video-stream?url={quote(stream_src, safe='')}&referer={quote('https://portal-tube.example/', safe='')}"
+                    else f"/api/proxy-video-stream?url={quote(stream_src, safe='')}&referer={quote(native_adapter_url('portal_tube', 'https://portal-tube.example/'), safe='')}"
                 )
                 items.append(
                     make_item_entry(
@@ -1440,7 +1443,7 @@ def _extract_portal_state_video_page_creator(html: str, query: str) -> dict[str,
             creator_name = str(perf.get("name") or "").strip()
             inurl = str(perf.get("inurl") or "").strip().strip("/")
             if inurl:
-                source_page = f"https://portal-state.example/pornstars/{inurl}"
+                source_page = native_adapter_url("portal_state", f"https://portal-state.example/pornstars/{inurl}")
                 for a in tree.css(f"a[href*='/pornstars/{inurl}']"):
                     img = a.css_first("img")
                     if img:
@@ -1517,7 +1520,7 @@ class PortalStateSearchProvider:
         page = int(cursor_data.get("page") or 1)
         try:
             if category == "albums":
-                url = f"https://portal-state.example/photos/search/{q_enc}" + (f"?page={page}" if page > 1 else "")
+                url = native_adapter_url("portal_state", f"https://portal-state.example/photos/search/{q_enc}") + (f"?page={page}" if page > 1 else "")
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return SearchPageResult(source_id="portal_state", category=category, error=f"http_{resp.status_code}")
@@ -1619,7 +1622,7 @@ class PortalStateSearchProvider:
                 )
 
             # videos or profiles (extracted from searchResult.videoThumbProps + missing-landing video-page metadata)
-            url = f"https://portal-state.example/search/{q_enc}" + (f"?page={page}" if page > 1 else "")
+            url = native_adapter_url("portal_state", f"https://portal-state.example/search/{q_enc}") + (f"?page={page}" if page > 1 else "")
             if category == "profiles":
                 from .timeline_directory import search_adapted_directory_profiles
 

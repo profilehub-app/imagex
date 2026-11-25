@@ -69,7 +69,10 @@ export interface CatalogEnrichmentMetadata {
   artists?: Array<{ name: string; url?: string; kind?: string }>;
   channels?: Array<{ name: string; url?: string; kind?: string }>;
   tags?: string[];
+  tagEntities?: Array<{ name: string; url?: string; kind?: string }>;
   photoCount?: number;
+  photos?: string[];
+  photoItems?: TimelinePhotoItem[];
 }
 
 export interface ForumBoardItem {

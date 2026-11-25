@@ -36,6 +36,7 @@ import {
   removeIntegratedSourceApi,
   resetIntegratedSourcesApi,
   type BrowseSubfilterOption,
+  type CatalogEnrichmentMetadata,
   type ForumBoardSection,
   type ForumThreadViewResponse,
   type TimelineBrowseFeedSlice,
@@ -166,6 +167,7 @@ interface ProfileTimelineState {
   lightbox: TimelineLightboxState;
   browseCapabilities: Record<string, TimelineBrowseSourceCapability>;
   browseFeedsBySource: Record<string, TimelineBrowseFeedSlice>;
+  enrichedCatalogByUrl: Record<string, CatalogEnrichmentMetadata>;
   dynamicSubfiltersBySource: Record<string, BrowseSubfilterOption[]>;
   directoriesByKey: Record<string, TimelineDirectorySlice>;
   forumBoardsBySource: Record<string, TimelineForumBoardsSlice>;
@@ -410,6 +412,83 @@ function prioritizeCreatorsForDiscovery(creators: TimelineCreator[]): Array<{ id
     .map((creator) => ({ id: creator.id, url: creator.profileUrl }));
 }
 
+export function applyCatalogEnrichmentToPost(
+  post: TimelinePost,
+  meta: CatalogEnrichmentMetadata | undefined
+): TimelinePost {
+  if (!meta) return post;
+  const primaryArtist = Array.isArray(meta.artists) && meta.artists.length > 0 ? meta.artists[0] : undefined;
+  const nextTitle = meta.title && (!post.title || /^\d+$/.test(post.title.trim()) || post.needsEnrichment || /\s+\d{5,}$/.test(post.title.trim()))
+    ? meta.title
+    : post.title;
+  const rawTags = Array.isArray(meta.tags) ? meta.tags : [];
+  const normalizedTags = rawTags
+    .map((t: any) => (typeof t === 'string' ? t.trim() : String(t?.name || '').trim()))
+    .filter(Boolean);
+  const rawTagEntities = Array.isArray(meta.tagEntities)
+    ? meta.tagEntities
+    : rawTags.filter((t: any) => t && typeof t === 'object' && typeof t.name === 'string');
+  const normalizedTagEntities = rawTagEntities
+    .map((t: any) => ({
+      name: String(t?.name || '').trim(),
+      url: typeof t?.url === 'string' ? t.url : undefined,
+      kind: (t?.kind || 'tag') as any,
+    }))
+    .filter((t: any) => Boolean(t.name));
+  const metaPhotos = Array.isArray(meta.photos)
+    ? meta.photos.filter((u): u is string => typeof u === 'string' && Boolean(u.trim()))
+    : [];
+  const metaPhotoItems: TimelinePhotoItem[] = Array.isArray(meta.photoItems)
+    ? meta.photoItems
+        .filter((it) => it && typeof it.url === 'string' && Boolean(it.url.trim()))
+        .map((it, idx) => ({
+          ...it,
+          id: it.id || `${post.id}-ph-${idx}`,
+          thumbnailUrl: it.thumbnailUrl || it.url,
+          pageUrl: it.pageUrl || post.albumUrl || post.originalUrl,
+          sourcePage: it.sourcePage || post.albumUrl || post.originalUrl,
+        }))
+    : metaPhotos.map((u, idx) => ({
+        id: `${post.id}-ph-${idx}`,
+        url: u,
+        thumbnailUrl: u,
+        pageUrl: post.albumUrl || post.originalUrl,
+        sourcePage: post.albumUrl || post.originalUrl,
+        isResolvedOriginal: true,
+      }));
+  const shouldUpdateCreatorName = Boolean(
+    meta.author &&
+      (!post.creatorName ||
+        post.creatorName.includes(' - ') ||
+        post.creatorId.endsWith(':discover') ||
+        post.creatorHandle === `@${post.source || ''}`)
+  );
+  const resolvedPhotoCount =
+    typeof meta.photoCount === 'number' && meta.photoCount > 0
+      ? meta.photoCount
+      : metaPhotos.length > 0
+        ? metaPhotos.length
+        : post.photoCount;
+  return {
+    ...post,
+    title: nextTitle,
+    creatorName: shouldUpdateCreatorName ? (meta.author || primaryArtist?.name || post.creatorName) : post.creatorName,
+    sourcePage: meta.authorUrl || primaryArtist?.url || post.sourcePage,
+    artists: Array.isArray(meta.artists) && meta.artists.length > 0
+      ? meta.artists.map((a) => ({ ...a, kind: (a.kind || 'artist') as any }))
+      : post.artists,
+    channels: Array.isArray(meta.channels) && meta.channels.length > 0
+      ? meta.channels.map((c) => ({ ...c, kind: (c.kind || 'channel') as any }))
+      : post.channels,
+    tags: normalizedTags.length > 0 ? normalizedTags : post.tags,
+    tagEntities: normalizedTagEntities.length > 0 ? normalizedTagEntities : post.tagEntities,
+    photos: metaPhotos.length > 0 ? metaPhotos : post.photos,
+    photoItems: metaPhotoItems.length > 0 ? metaPhotoItems : post.photoItems,
+    photoCount: resolvedPhotoCount,
+    needsEnrichment: false,
+  };
+}
+
 function subscribeToLibraryStore() {
   if (timelineLibrarySubscribed) return;
   timelineLibrarySubscribed = true;
@@ -472,6 +551,7 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
   },
   browseCapabilities: {},
   browseFeedsBySource: {},
+  enrichedCatalogByUrl: {},
   dynamicSubfiltersBySource: {},
   directoriesByKey: {},
   forumBoardsBySource: {},
@@ -1806,41 +1886,7 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
       const patchPost = (post: TimelinePost): TimelinePost => {
         const key = post.originalUrl || post.albumUrl || '';
         const meta = (key && metadata[key]) || (post.albumUrl && metadata[post.albumUrl]) || undefined;
-        if (!meta) return post;
-        const primaryArtist = Array.isArray(meta.artists) && meta.artists.length > 0 ? meta.artists[0] : undefined;
-        const nextTitle = meta.title && (!post.title || /^\d+$/.test(post.title.trim()) || post.needsEnrichment)
-          ? meta.title
-          : post.title;
-        const rawTags = Array.isArray(meta.tags) ? meta.tags : [];
-        const normalizedTags = rawTags
-          .map((t: any) => (typeof t === 'string' ? t.trim() : String(t?.name || '').trim()))
-          .filter(Boolean);
-        const rawTagEntities = Array.isArray((meta as any).tagEntities)
-          ? (meta as any).tagEntities
-          : rawTags.filter((t: any) => t && typeof t === 'object' && typeof t.name === 'string');
-        const normalizedTagEntities = rawTagEntities
-          .map((t: any) => ({
-            name: String(t?.name || '').trim(),
-            url: typeof t?.url === 'string' ? t.url : undefined,
-            kind: (t?.kind || 'tag') as any,
-          }))
-          .filter((t: any) => Boolean(t.name));
-        return {
-          ...post,
-          title: nextTitle,
-          creatorName: meta.author || primaryArtist?.name || post.creatorName,
-          sourcePage: meta.authorUrl || primaryArtist?.url || post.sourcePage,
-          artists: Array.isArray(meta.artists) && meta.artists.length > 0
-            ? meta.artists.map((a) => ({ ...a, kind: (a.kind || 'artist') as any }))
-            : post.artists,
-          channels: Array.isArray(meta.channels) && meta.channels.length > 0
-            ? meta.channels.map((c) => ({ ...c, kind: (c.kind || 'channel') as any }))
-            : post.channels,
-          tags: normalizedTags.length > 0 ? normalizedTags : post.tags,
-          tagEntities: normalizedTagEntities.length > 0 ? normalizedTagEntities : post.tagEntities,
-          photoCount: typeof meta.photoCount === 'number' ? meta.photoCount : post.photoCount,
-          needsEnrichment: false,
-        };
+        return applyCatalogEnrichmentToPost(post, meta);
       };
 
       set((s) => {
@@ -1852,10 +1898,21 @@ export const useProfileTimelineStore = create<ProfileTimelineState>((set, get) =
           };
         }
         return {
+          enrichedCatalogByUrl: { ...s.enrichedCatalogByUrl, ...metadata },
           browseFeedsBySource: nextFeeds,
           posts: s.posts.map(patchPost),
         };
       });
+      if (timelineHasBootstrapped) {
+        const current = get();
+        void writeTimelineCatalog(
+          catalogSnapshot(
+            { ...current, creators: Object.values(current.creatorProfiles) },
+            timelineIdentityHints,
+            current.creatorRefreshedAt
+          )
+        );
+      }
     } catch {
       // Ignore silent background enrichment failure
     } finally {

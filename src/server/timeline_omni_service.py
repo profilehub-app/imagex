@@ -30,6 +30,7 @@ from .connector_registry import (
     VideoPortalDescriptor,
     find_connector_for_url,
     get_connector_descriptor,
+    get_native_adapter,
 )
 from .forum_board_engine import fetch_board_hierarchy, parse_forum_thread_page
 from .gallery_catalog_engine import enrich_catalog_items, list_catalog_directory, read_catalog_gallery_detail
@@ -511,15 +512,16 @@ async def get_search_sources(integrated_only: bool = Query(default=False)):
         if allowed_ids is not None and sid not in allowed_ids:
             continue
         conn = get_connector_descriptor(provider.capabilities.source_id)
+        native = get_native_adapter(sid)
         sources_out.append({
             "id": provider.capabilities.source_id,
-            "name": provider.capabilities.display_name,
+            "name": native.display_name if native else provider.capabilities.display_name,
             "categories": list(provider.capabilities.categories),
             "supportsLiveConnector": provider.capabilities.supports_live_connector,
             "iconKind": conn.icon_kind if conn is not None else None,
             "accentColor": getattr(conn, "accent_color", "") if conn is not None else "",
             "urlHints": dict(getattr(conn, "url_hints", {}) or {}) if conn is not None else {},
-            "origins": _connector_origins(conn),
+            "origins": [native.origin_url] if native else _connector_origins(conn),
             "subfilters": list(conn.subfilters) if conn is not None else [],
             "capabilities": (
                 conn.capabilities.to_frontend_dict(conn.search_categories)
@@ -547,6 +549,9 @@ async def omni_search_timeline(req: OmniSearchRequest):
         }
 
     target_source = (req.source or "all").strip().lower()
+    native = get_native_adapter(target_source)
+    if native is not None:
+        target_source = native.id
     target_category = (req.category or "all").strip().lower()
     providers = list_search_providers()
     allowed_ids = get_integrated_source_ids() if req.integrated_only else None
@@ -581,6 +586,9 @@ async def omni_search_timeline(req: OmniSearchRequest):
                 continue
             src_id, cat_id = raw_key.split(":", 1)
             src_id = src_id.strip().lower()
+            native = get_native_adapter(src_id)
+            if native is not None:
+                src_id = native.id
             cat_id = cat_id.strip().lower()
             if allowed_ids is not None and src_id not in allowed_ids:
                 continue

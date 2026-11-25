@@ -244,6 +244,13 @@ async def test_category_first_root_and_lazy_enrichment_and_entity_pagination(tmp
         assert [a["name"] for a in meta["artists"]] == ["Claire Vance"]
         assert "Unrelated Sidebar" not in str(meta)
         assert meta["photoCount"] == 2
+        assert meta["photos"] == [
+            "https://cdn.beta.example/1280/1.jpg",
+            "https://cdn.beta.example/1280/2.jpg",
+        ]
+        assert len(meta["photoItems"]) == 2
+        assert meta["photoItems"][0]["thumbnailUrl"] == "https://cdn.beta.example/460/1.jpg"
+        assert meta["photoItems"][0]["url"] == "https://cdn.beta.example/1280/1.jpg"
 
         calls_after_first = len(calls)
         await enrich_catalog_items(client, [{"url": "https://beta.example/pics/claire-vance-golden-hour-101/", "source": "cat_first"}])
@@ -256,6 +263,7 @@ async def test_category_first_root_and_lazy_enrichment_and_entity_pagination(tmp
         assert prof1["avatarUrl"] == "https://cdn.alpha.example/av/claire.jpg"
         assert prof1["hasMore"] is True
         assert prof1["nextPage"] == 2
+        assert prof1["albums"][0]["needsEnrichment"] is True
         assert len(prof1["relatedEntities"]) >= 2
 
         prof2 = await read_catalog_entity_profile(client, api_desc, "https://alpha.example/artists/claire-vance/", page=2)

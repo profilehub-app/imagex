@@ -46,6 +46,7 @@ interface AdaptiveProfileContentProps {
     trigger?: HTMLElement
   ) => void;
   onOpenThread?: (post: TimelinePost) => void;
+  onOpenGallery?: (post: TimelinePost) => void;
   onLoadMoreProfile?: () => void;
   isLoadingMoreProfile?: boolean;
 }
@@ -67,6 +68,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
   onOpenVideo,
   onOpenEntity,
   onOpenThread,
+  onOpenGallery,
   onLoadMoreProfile,
   isLoadingMoreProfile = false,
 }) => {
@@ -529,6 +531,7 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
                 onOpenProfile={onOpenProfile}
                 onOpenEntity={onOpenEntity}
                 onOpenThread={onOpenThread}
+                onOpenGallery={onOpenGallery}
                 onOpenComments={onOpenComments}
                 onOpenLightbox={onOpenLightbox}
                 isDesktop={isDesktop}
@@ -1056,7 +1059,12 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
                     tabIndex={0}
                     aria-label={`${isEn ? 'Open album' : 'Abrir álbum'} ${album.title}`}
                     onKeyDown={activateCardOnKeyDown}
-                    onClick={() =>
+                    onClick={() => {
+                      const albumCaps = getSourceCapabilities(resolveTimelinePlatform(album.albumUrl || album.originalUrl, album.source) || 'generic', album);
+                      if (onOpenGallery && albumCaps.archetype === 'gallery_catalog' && (album.albumUrl || album.originalUrl)) {
+                        onOpenGallery(album);
+                        return;
+                      }
                       onOpenLightbox(
                         album.photos || [cover || ''],
                         0,
@@ -1064,8 +1072,8 @@ export const AdaptiveProfileContent: React.FC<AdaptiveProfileContentProps> = ({
                         album.albumUrl || album.originalUrl,
                         album.photoItems,
                         album.photoCount
-                      )
-                    }
+                      );
+                    }}
                     className="relative aspect-square rounded-2xl overflow-hidden group cursor-pointer bg-[var(--tl-surface)] border border-[var(--tl-border)] hover:border-[var(--tl-accent-border)] transition-all shadow-lg"
                   >
                     <img

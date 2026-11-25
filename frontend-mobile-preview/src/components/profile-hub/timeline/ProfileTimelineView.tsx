@@ -1394,18 +1394,26 @@ export const ProfileTimelineView: React.FC<ProfileTimelineViewProps> = ({
   // Keep a playing/handoff card's keyed node even if new posts push it beyond the prefix.
   const renderedFeedPosts = displayedPosts.filter((post, index) => index < feedCount || post.id === pinnedFeedPostId);
   useEffect(() => {
-    if (!active || !isVisualBrowseSource || visualScopeMode !== 'discover') return;
+    if (!active) return;
     const candidates = renderedFeedPosts
-      .filter((p) => (p.needsEnrichment || /^\d+$/.test((p.title || '').trim())) && (p.originalUrl || p.albumUrl))
+      .filter((p) => {
+        const postSource = sourceOf(p);
+        const caps = getSourceCapabilities(postSource, p);
+        if (caps.archetype !== 'gallery_catalog') return false;
+        if (!(p.originalUrl || p.albumUrl)) return false;
+        const needsPhotoHydration =
+          p.photoCount == null || (Array.isArray(p.photos) ? p.photos.length <= 1 : true);
+        return Boolean(p.needsEnrichment || needsPhotoHydration || /^\d+$/.test((p.title || '').trim()));
+      })
       .map((p) => ({
         url: String(p.originalUrl || p.albumUrl || ''),
-        source: String(p.source || source),
+        source: String(sourceOf(p) || source),
       }))
       .filter((c) => Boolean(c.url));
     if (candidates.length > 0) {
       void queueCatalogEnrichment(candidates);
     }
-  }, [active, isVisualBrowseSource, visualScopeMode, renderedFeedPosts, source, queueCatalogEnrichment]);
+  }, [active, renderedFeedPosts, source, sourceOf, queueCatalogEnrichment]);
   useLayoutEffect(() => {
     mountedFeedPostIdsRef.current = new Set(renderedFeedPosts.map(post => post.id));
     feedWindows.current.set(feedWindowKey, feedCount);
@@ -1939,6 +1947,7 @@ export const ProfileTimelineView: React.FC<ProfileTimelineViewProps> = ({
               if (entity.url) openWatchCreator(entity.url, { name: entity.name });
             }}
             onOpenThread={(p) => void openThreadView(p, p.title, sourceOf(p))}
+            onOpenGallery={(p) => openGalleryView(p)}
             onLoadMoreProfile={() => {
               const snap = profileEntry.value.snapshot;
               if (!snap?.creator?.id) return;
@@ -2363,6 +2372,7 @@ export const ProfileTimelineView: React.FC<ProfileTimelineViewProps> = ({
               if (entity.url) openWatchCreator(entity.url, { name: entity.name });
             }}
             onOpenThread={(p) => void openThreadView(p, p.title, sourceOf(p))}
+            onOpenGallery={(p) => openGalleryView(p)}
             onLoadMoreProfile={() => void loadMoreCreatorProfileAlbums(selectedCreator.id)}
             isLoadingMoreProfile={isLoadingMoreProfile}
             onOpenComments={(id) => openComments(id)}
@@ -2822,6 +2832,7 @@ export const ProfileTimelineView: React.FC<ProfileTimelineViewProps> = ({
                   suspended={!active || !!watchSession}
                   onOpenVideo={openVideo}
                   onOpenPlaylist={pl => void openSearchPlaylist(pl)}
+                  onOpenGallery={(p) => openGalleryView(p)}
                   key={post.id}
                   post={post}
                   sourceLabel={getTimelineSourceDisplayName(sourceOf(post), isEn ? 'en' : 'pt')}

@@ -5,6 +5,7 @@ batches as well as direct HTML strings, Lexbor trees, and BeautifulSoup trees.
 """
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlsplit, urlunsplit
+from src.server.connector_registry import native_adapter_url, native_adapter_matches
 from bs4 import BeautifulSoup
 from selectolax.lexbor import LexborHTMLParser
 
@@ -259,7 +260,7 @@ def assemble_portal_grid_profile(
     if canonical_search_gifs and not any(a.get("id") == "alb-gifs-search" for a in canonical_albums):
         from urllib.parse import quote_plus
         p_name = root_info.get("name") or "Comunidade"
-        search_gif_url = f"https://portal-tube.example/gifs/search?search={quote_plus(p_name.strip().lower())}"
+        search_gif_url = native_adapter_url("portal_tube", f"https://portal-tube.example/gifs/search?search={quote_plus(p_name.strip().lower())}")
         search_thumb = (
             next((g.get("thumbnailUrl") for g in canonical_search_gifs if g.get("thumbnailUrl")), "")
             or (root_info.get("avatar") or "")
@@ -613,7 +614,8 @@ def parse_profile_page(
             or (root_tree.css_first(".landing-info, .channel-header, .video-thumb, [data-video-id]") is not None and "portal_state" in (html if isinstance(html, str) else ""))
         )
         is_portal_grid = not is_youtube and not is_portal_tube and not is_portal_state and (
-            "portal_grid" in netloc
+            native_adapter_matches("portal_grid", source_url)
+            or "portal_grid" in netloc
             or root_tree.css_first("div[class*=psbio]") is not None
             or root_tree.css_first("div.pornstar-video-results-layout") is not None
         )

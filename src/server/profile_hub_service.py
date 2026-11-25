@@ -10,6 +10,7 @@ import math
 import os
 import re
 from typing import Any, Dict, List, Literal, Optional
+from src.server.connector_registry import native_adapter_url, native_adapter_matches, get_native_adapter
 from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
 import httpx
@@ -116,13 +117,17 @@ async def _fetch_ph_or_default(
     else:
         resp = await client.get(url)
     if is_portal_tube_host(url) and resp.status_code == 200:
+        adapter = get_native_adapter("portal_tube")
+        cookie_domain = adapter.domains[0] if adapter else "portal-tube.example"
+        cookie_host = adapter.canonical_host if adapter else "www.portal-tube.example"
+
         for _ in range(3):
             if "leastFactor" not in resp.text:
                 break
             solved_cookies = await asyncio.to_thread(solve_js_challenge, resp.text)
             if solved_cookies:
                 for k, v in solved_cookies.items():
-                    for domain in (".portal-tube.example", "portal-tube.example", "www.portal-tube.example"):
+                    for domain in ("." + cookie_domain, cookie_domain, cookie_host):
                         try:
                             client.cookies.set(k.strip(), v.strip(), domain=domain)
                         except Exception:
@@ -131,7 +136,7 @@ async def _fetch_ph_or_default(
                 cookie = _solve_portal_tube_challenge(resp.text)
                 if cookie and "=" in cookie:
                     k, v = cookie.split("=", 1)
-                    for domain in (".portal-tube.example", "portal-tube.example", "www.portal-tube.example"):
+                    for domain in ("." + cookie_domain, cookie_domain, cookie_host):
                         try:
                             client.cookies.set(k.strip(), v.strip(), domain=domain)
                         except Exception:
@@ -426,7 +431,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                     if slug_match:
                         slug = slug_match.group(1)
                         for cand in ["model", "pornstar", "channels", "users"]:
-                            cand_url = f"https://portal-tube.example/{cand}/{slug}"
+                            cand_url = native_adapter_url("portal_tube", f"https://portal-tube.example/{cand}/{slug}")
                             try:
                                 cand_resp = await _fetch_ph_or_default(client, cand_url)
                                 cand_final_path = urlsplit(str(cand_resp.url)).path.rstrip("/").lower()
@@ -455,7 +460,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
             is_youtube = is_youtube_channel_url(final_url)
             is_portal_tube = not is_youtube and (is_portal_tube_profile_url(final_url) or is_portal_tube_host(final_url))
             is_portal_state = not is_youtube and not is_portal_tube and (is_portal_state_profile_url(final_url) or is_portal_state_host(final_url))
-            is_portal_grid = not is_youtube and not is_portal_tube and not is_portal_state and ("portal_grid" in urlsplit(final_url).netloc.lower())
+            is_portal_grid = not is_youtube and not is_portal_tube and not is_portal_state and (native_adapter_matches("portal_grid", final_url) or "portal_grid" in urlsplit(final_url).netloc.lower())
             vp_conn = (
                 find_connector_for_url(final_url)
                 if not (is_youtube or is_portal_tube or is_portal_state or is_portal_grid)
@@ -785,8 +790,8 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
                         return None
                     encoded_q = quote_plus(p_name.lower())
                     search_urls = [
-                        f"https://portal-tube.example/gifs/search?search={encoded_q}&page={p}" if p > 1
-                        else f"https://portal-tube.example/gifs/search?search={encoded_q}"
+                        native_adapter_url("portal_tube", f"https://portal-tube.example/gifs/search?search={encoded_q}&page={p}") if p > 1
+                        else native_adapter_url("portal_tube", f"https://portal-tube.example/gifs/search?search={encoded_q}")
                         for p in range(1, 6)
                     ]
                     try:
@@ -1095,7 +1100,7 @@ async def _scan_profile(request: ProfileScanRequest, on_profile=None):
 
                 page_urls = [f"{final_url.rstrip('/')}/{p}/" for p in range(2, max_video_page + 1)]
                 photos_url = urljoin(final_url.rstrip("/") + "/", "photos/")
-                playlists_url = f"https://portal-grid.example/search-playlists/{clean_slug}/"
+                playlists_url = native_adapter_url("portal_grid", f"https://portal-grid.example/search-playlists/{clean_slug}/")
 
                 # Overlapped fetch + worker pool extraction: each page is parsed by a worker
                 # as soon as its HTTP response completes, without waiting for slower pages.
@@ -1625,7 +1630,7 @@ async def get_album_photos(request: AlbumPhotosRequest):
     if is_portal_tube_host(final_url) and photos and any(p.get("type") == "gif" for p in photos):
         # Fast concurrent probe to drop legacy 410 Gone / 404 dead media cards
         verify_sem = asyncio.Semaphore(16)
-        async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://portal-tube.example/"}) as v_client:
+        async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": "Mozilla/5.0", "Referer": native_adapter_url("portal_tube", "https://portal-tube.example/")}) as v_client:
             async def _is_live(p_item):
                 thumb = p_item.get("thumbnailUrl")
                 if not thumb:
@@ -1652,9 +1657,9 @@ async def get_album_photos(request: AlbumPhotosRequest):
             orig = p_item.get("originalUrl") or ""
             if orig and ("cdn.portal-tube.example" in orig or is_portal_tube_host(final_url)):
                 if p_item.get("format") in ("mp4", "webm") or ".mp4" in orig:
-                    p_item["streamUrl"] = f"/api/proxy-video-stream?url={quote(orig)}&referer=https://portal-tube.example/"
+                    p_item["streamUrl"] = f"/api/proxy-video-stream?url={quote(orig)}&referer={quote(native_adapter_url('portal_tube', 'https://portal-tube.example/'), safe='')}"
                 else:
-                    p_item["streamUrl"] = f"/api/proxy-image?url={quote(orig)}&referer=https://portal-tube.example/"
+                    p_item["streamUrl"] = f"/api/proxy-image?url={quote(orig)}&referer={quote(native_adapter_url('portal_tube', 'https://portal-tube.example/'), safe='')}"
 
     first_res["photos"] = photos
     first_res["count"] = len(photos)

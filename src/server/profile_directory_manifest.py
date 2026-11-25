@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Literal, Protocol
+from src.server.connector_registry import native_adapter_url, native_adapter_host, native_adapter_matches
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
@@ -147,7 +148,7 @@ class PortalGridDirectoryAdapter:
         try:
             parts = urlsplit(url)
             valid_origin = (
-                parts.scheme == "https" and parts.hostname in self.hosts
+                parts.scheme == "https" and (parts.hostname in self.hosts or native_adapter_matches(self.adapter_id, url))
                 and parts.port in (None, 443) and not parts.username and not parts.password
                 and not parts.fragment and "\\" not in url
             )
@@ -184,7 +185,7 @@ class PortalGridDirectoryAdapter:
             if match and match["page"] == "1":
                 path = path[:-2]
         query = urlencode(sorted(set(pairs)))
-        return urlunsplit(("https", "www.portal-grid.example", path, query, ""))
+        return urlunsplit(("https", native_adapter_host(self.adapter_id, "www.portal-grid.example"), path, query, ""))
 
     def recognize(self, url: str) -> Literal["directory", "profile"] | None:
         for kind in ("directory", "profile"):
@@ -241,7 +242,7 @@ class PortalGridDirectoryAdapter:
                 candidate = urljoin(base, raw)
                 parts = urlsplit(candidate)
                 safe = (parts.scheme == "https" and parts.hostname
-                        and (parts.hostname == "portal-grid.example" or parts.hostname.endswith(".portal-grid.example"))
+                        and (native_adapter_matches(self.adapter_id, candidate) or parts.hostname == "portal-grid.example" or parts.hostname.endswith(".portal-grid.example"))
                         and parts.port in (None, 443) and not parts.username and not parts.password)
             except ValueError:
                 safe = False
@@ -366,9 +367,9 @@ class PortalGridDirectoryAdapter:
         page_complete = "card_without_supported_profile_url" not in warnings
         return DirectoryPage(
             adapter_id=self.adapter_id,
-            directory_key=stable_key(self.adapter_id, "https://portal-grid.example/pornstar-list/"),
+            directory_key=stable_key(self.adapter_id, native_adapter_url("portal_grid", "https://portal-grid.example/pornstar-list/")),
             query_key=stable_key(self.adapter_id, self.context_url(url)),
-            source_url="https://portal-grid.example/pornstar-list/", page_url=url,
+            source_url=native_adapter_url("portal_grid", "https://portal-grid.example/pornstar-list/"), page_url=url,
             items=entries, loaded_count=len(entries), page_complete=page_complete,
             directory_complete=page_complete and current == 1 and has_more is False,
             pagination=DirectoryPagination(current_page=current, links=links,
@@ -395,7 +396,7 @@ class PortalTubeDirectoryAdapter:
         try:
             parts = urlsplit(url)
             host = (parts.hostname or "").lower()
-            valid_host = bool(re.search(r"(?:^|\.)portal_tube\.[a-z.]+$", host))
+            valid_host = native_adapter_matches(self.adapter_id, url) or bool(re.search(r"(?:^|\.)portal_tube\.[a-z.]+$", host))
             valid_origin = (
                 parts.scheme in ("http", "https")
                 and valid_host
@@ -446,7 +447,7 @@ class PortalTubeDirectoryAdapter:
             normalized_pairs.append((key, value))
 
         query = urlencode(sorted(set(normalized_pairs)))
-        return urlunsplit(("https", "www.portal-tube.example", raw_path, query, ""))
+        return urlunsplit(("https", native_adapter_host(self.adapter_id, "www.portal-tube.example"), raw_path, query, ""))
 
     def recognize(self, url: str) -> Literal["directory", "profile"] | None:
         for kind in ("directory", "profile"):
@@ -671,11 +672,11 @@ class PortalTubeDirectoryAdapter:
         current_parts = urlsplit(url)
         query_dict = dict(parse_qsl(current_parts.query))
         active_letter = query_dict.get("letter", "").upper() or None
-        base_source = urlunsplit(("https", "www.portal-tube.example", current_parts.path, "", ""))
+        base_source = urlunsplit(("https", native_adapter_host(self.adapter_id, "www.portal-tube.example"), current_parts.path, "", ""))
         alphabet_links = {
             ch: urlunsplit((
                 "https",
-                "www.portal-tube.example",
+                native_adapter_host(self.adapter_id, "www.portal-tube.example"),
                 "/pornstars",
                 urlencode([(k, v) for k, v in parse_qsl(current_parts.query) if k not in ("page", "letter")] + [("letter", ch.lower())]),
                 "",
@@ -944,7 +945,7 @@ class PortalStateDirectoryAdapter:
         try:
             parts = urlsplit(url.strip())
             host = (parts.hostname or "").lower()
-            valid_host = bool(
+            valid_host = native_adapter_matches(self.adapter_id, url) or bool(
                 re.search(
                     r"(?:^|\.)(?:[a-z]{2,3}\.)?(portal_state|portal_state_cdn|xhday|xhvideotop|portal_statelive|portal_state\d*)\.[a-z.]+$",
                     host,
@@ -1028,7 +1029,7 @@ class PortalStateDirectoryAdapter:
             normalized_pairs.append((key, value))
 
         query = urlencode(sorted(set(normalized_pairs)))
-        return urlunsplit(("https", "portal-state.example", clean_path, query, ""))
+        return urlunsplit(("https", native_adapter_host(self.adapter_id, "portal-state.example"), clean_path, query, ""))
 
     def recognize(self, url: str) -> Literal["directory", "profile"] | None:
         for kind in ("directory", "profile"):
@@ -1211,9 +1212,9 @@ class PortalStateDirectoryAdapter:
 
             slug = (urlsplit(source).path.split("/")[-1] or "").lower()
             norm_name = (name or "").lower().strip()
-            if url.startswith("https://portal-state.example/shemale/") or "/shemale/" in url:
+            if url.startswith(native_adapter_url("portal_state", "https://portal-state.example/shemale/")) or "/shemale/" in url:
                 card_gender = "trans"
-            elif url.startswith("https://portal-state.example/gay/") or "/gay/" in url:
+            elif url.startswith(native_adapter_url("portal_state", "https://portal-state.example/gay/")) or "/gay/" in url:
                 card_gender = "male"
             elif is_male_performer(name, source):
                 card_gender = "male"
@@ -1290,7 +1291,7 @@ class PortalStateDirectoryAdapter:
 
         filter_query = urlencode([(k, v) for k, v in parse_qsl(urlsplit(url).query) if k != "page"])
         for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-            base_alpha = alphabet_links.get(ch, f"https://portal-state.example/pornstars/all/{ch.lower()}")
+            base_alpha = alphabet_links.get(ch, native_adapter_url("portal_state", f"https://portal-state.example/pornstars/all/{ch.lower()}"))
             if filter_query:
                 parts = urlsplit(base_alpha)
                 q = f"{parts.query}&{filter_query}" if parts.query else filter_query
@@ -1325,7 +1326,7 @@ class PortalStateDirectoryAdapter:
                 active_category = m_curr_cat.group(1)
 
         capabilities = DirectoryCapabilities(
-            all_url="https://portal-state.example/pornstars",
+            all_url=native_adapter_url("portal_state", "https://portal-state.example/pornstars"),
             query_url=self.context_url(url),
             active_letter=active_letter,
             active_category=active_category,
@@ -1401,9 +1402,9 @@ class PortalStateDirectoryAdapter:
         entries = list(profiles.values())
         return DirectoryPage(
             adapter_id=self.adapter_id,
-            directory_key=stable_key(self.adapter_id, "https://portal-state.example/pornstars"),
+            directory_key=stable_key(self.adapter_id, native_adapter_url("portal_state", "https://portal-state.example/pornstars")),
             query_key=stable_key(self.adapter_id, self.context_url(url)),
-            source_url="https://portal-state.example/pornstars",
+            source_url=native_adapter_url("portal_state", "https://portal-state.example/pornstars"),
             page_url=url,
             items=entries,
             loaded_count=len(entries),

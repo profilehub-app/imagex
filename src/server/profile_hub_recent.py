@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 import re
 from urllib.parse import urljoin, urlsplit, urlunsplit, unquote, urlencode
+from src.server.connector_registry import native_adapter_matches, native_adapter_for_url
 
 import httpx
 import httpcore
@@ -87,7 +88,7 @@ _PORTAL_TUBE_PROFILE_PATH = re.compile(
 def _is_portal_grid_user_profile_url(url: str) -> bool:
     parts = urlsplit(url)
     host = (parts.hostname or '').lower()
-    valid_host = host == 'portal-grid.example' or host.endswith('.portal-grid.example')
+    valid_host = native_adapter_matches("portal_grid", url) or host == 'portal-grid.example' or host.endswith('.portal-grid.example')
     return (
         parts.scheme == 'https'
         and valid_host
@@ -103,7 +104,7 @@ def _is_portal_grid_user_profile_url(url: str) -> bool:
 def _is_portal_tube_profile_route(url: str) -> bool:
     parts = urlsplit(url)
     host = (parts.hostname or '').lower()
-    valid_host = host == 'portal-tube.example' or host.endswith('.portal-tube.example')
+    valid_host = native_adapter_matches("portal_tube", url) or host == 'portal-tube.example' or host.endswith('.portal-tube.example')
     return (
         parts.scheme == 'https'
         and valid_host
@@ -143,6 +144,9 @@ def recent_source(url):
         return 'portal_grid'
     if _is_portal_tube_profile_route(safe):
         return 'portal_tube'
+    adapter = native_adapter_for_url(safe)
+    if adapter is not None and any(pattern.fullmatch(urlsplit(safe).path) for pattern in adapter.profile_paths):
+        return adapter.id
     conn = find_connector_for_url(safe)
     if isinstance(conn, VideoPortalDescriptor):
         path = urlsplit(safe).path or '/'

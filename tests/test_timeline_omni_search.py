@@ -14,6 +14,17 @@ from src.server.timeline_search_providers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_connector_config(tmp_path, monkeypatch):
+    from src.server import connector_registry
+
+    monkeypatch.setenv("IMAGEX_CONNECTORS_FILE", str(tmp_path / "connectors.local.json"))
+    monkeypatch.setenv("IMAGEX_BUNDLED_CONNECTORS_FILE", str(tmp_path / "connectors.defaults.json"))
+    connector_registry.clear_connector_cache()
+    yield
+    connector_registry.clear_connector_cache()
+
+
 class _DummyProvider:
     capabilities = SearchProviderCapabilities(
         source_id="custom_mock",
