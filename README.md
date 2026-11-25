@@ -1,4 +1,4 @@
-# ⚡ IMAGEX v5.8.0
+# ⚡ IMAGEX v5.8.1
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀🔍
 
@@ -12,7 +12,8 @@ Autonomous platform for intelligent extraction, organization, and inspection of 
 - Search, source controls and creator navigation are easier to reach on smaller screens.
 - Explore and its dialogs follow the selected app theme.
 
-[Read the full release notes in English and Portuguese](docs/release-notes-v5.8.0.md).
+[Read the v5.8.1 release notes in English and Portuguese](docs/release-notes-v5.8.1.md).
+[Read the v5.8.0 release notes](docs/release-notes-v5.8.0.md).
 
 ---
 

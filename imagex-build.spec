@@ -1,10 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
+import os
+
 datas = [
     ('frontend-mobile-preview/dist', 'frontend-mobile-preview/dist'),
     ('assets', 'assets')
 ]
+
+# Default connectors are untracked; ship them read-only inside the executable so a fresh
+# install works without any user-provided file. Builds must provide this file.
+_DEFAULT_CONNECTORS = os.path.join('config', 'connectors.local.json')
+if not os.path.isfile(_DEFAULT_CONNECTORS):
+    raise SystemExit(f'Missing {_DEFAULT_CONNECTORS}: refusing to build an executable without default connectors.')
+datas.append((_DEFAULT_CONNECTORS, 'config'))
 binaries = []
 hiddenimports = ['uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.lifespan.on']
 tmp_ret = collect_all('src')

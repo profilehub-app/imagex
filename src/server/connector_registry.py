@@ -1,8 +1,9 @@
 """Runtime loader and typed registry for external visual catalog, forum board, and image host connectors.
 
 Reads connector manifests from `IMAGEX_CONNECTORS_FILE` (or `config/connectors.local.json`
-when present). Keeps engine, routing, search, and UI modules completely decoupled from
-specific upstream site names or domains.
+when present), layered on top of read-only defaults shipped inside packaged builds. Keeps
+engine, routing, search, and UI modules completely decoupled from specific upstream site
+names or domains.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -385,37 +387,89 @@ def get_writable_connectors_path() -> Path:
     return get_default_local_connectors_path()
 
 
-def _resolve_config_path() -> Path | None:
-    env_path = os.environ.get("IMAGEX_CONNECTORS_FILE", "").strip()
+def get_bundled_connectors_path() -> Path | None:
+    """Read-only default connectors shipped inside the packaged executable, if any.
+
+    `IMAGEX_BUNDLED_CONNECTORS_FILE` overrides the location (used by tests and custom builds).
+    """
+    env_path = os.environ.get("IMAGEX_BUNDLED_CONNECTORS_FILE", "").strip()
     if env_path:
-        p = Path(env_path)
-        return p if p.is_file() else None
-    default_path = get_default_local_connectors_path()
-    if default_path.is_file():
-        return default_path
+        return Path(env_path)
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and bundle_root:
+        return Path(bundle_root) / "config" / "connectors.local.json"
     return None
+
+
+def _resolve_config_paths() -> list[Path]:
+    """Return existing connector files in merge order: bundled defaults first, user file last."""
+    candidates: list[Path] = []
+    bundled = get_bundled_connectors_path()
+    if bundled is not None:
+        candidates.append(bundled)
+    candidates.append(get_writable_connectors_path())
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in candidates:
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen or not p.is_file():
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+_MERGE_KEYS = ("catalogs", "forums", "imageHosts", "videoPortals")
+
+
+def _merge_connector_payloads(payloads: list[dict[str, Any]]) -> dict[str, list[Any]]:
+    """Merge connector payloads by id; later payloads override earlier entries with the same id."""
+    merged: dict[str, list[Any]] = {}
+    for key in _MERGE_KEYS:
+        by_id: dict[str, Any] = {}
+        anonymous: list[Any] = []
+        for payload in payloads:
+            for row in payload.get(key) or []:
+                sid = str(row.get("id") or "").strip().lower() if isinstance(row, dict) else ""
+                if sid:
+                    by_id[sid] = row
+                else:
+                    anonymous.append(row)
+        merged[key] = [*by_id.values(), *anonymous]
+    return merged
 
 
 def load_connector_bundle(force_reload: bool = False) -> ConnectorBundle:
     global _BUNDLE_CACHE
     if force_reload:
         _BUNDLE_CACHE = None
-    path = _resolve_config_path()
-    if path is None:
+    paths = _resolve_config_paths()
+    if not paths:
         return ConnectorBundle()
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return ConnectorBundle()
-    key = str(path)
-    if _BUNDLE_CACHE is not None and _BUNDLE_CACHE[0] == key and _BUNDLE_CACHE[1] == mtime:
+    stamps: list[str] = []
+    for p in paths:
+        try:
+            stamps.append(f"{p}:{p.stat().st_mtime_ns}")
+        except OSError:
+            continue
+    key = "|".join(stamps)
+    if _BUNDLE_CACHE is not None and _BUNDLE_CACHE[0] == key:
         return _BUNDLE_CACHE[2]
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    payloads: list[dict[str, Any]] = []
+    for p in paths:
+        try:
+            raw_payload = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(raw_payload, dict):
+            payloads.append(raw_payload)
+    if not payloads:
         return ConnectorBundle()
-    if not isinstance(payload, dict):
-        return ConnectorBundle()
+    payload = _merge_connector_payloads(payloads)
+    mtime = 0.0
 
     catalogs: list[CatalogDescriptor] = []
     for raw in payload.get("catalogs") or []:
