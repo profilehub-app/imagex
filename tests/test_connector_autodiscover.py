@@ -173,3 +173,141 @@ def test_connector_bundle_import_export_delete_and_validation(tmp_path: Path, mo
 def test_builtin_platforms_exclude_slack_and_instagram():
     ids = {item["id"] for item in integrated_sources_service._BUILTIN_PLATFORMS}
     assert ids == {"youtube", "x", "pinterest", "imgur"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frozen", [False, True], ids=["source", "packaged"])
+async def test_clean_install_discovers_public_deep_link_without_home(
+    tmp_path: Path, monkeypatch, frozen: bool
+):
+    import sys
+    from src.core import runtime_paths
+
+    app_dir = tmp_path / "app"
+    monkeypatch.setattr(runtime_paths, "get_app_base_dir", lambda: app_dir)
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "empty-bundle"), raising=False)
+    monkeypatch.delenv("IMAGEX_CONNECTORS_FILE", raising=False)
+    monkeypatch.delenv("IMAGEX_BUNDLED_CONNECTORS_FILE", raising=False)
+    monkeypatch.setenv("IMAGEX_TEST_ALLOW_LOCALHOST", "1")
+    monkeypatch.setattr(connector_autodiscover, "check_ytdlp_runtime_support", lambda _: False)
+    connector_registry.clear_connector_cache()
+    url = "https://portal.example/video/abc1"
+    assert connector_registry.find_connector_for_url(url) is None
+
+    def fetch(request):
+        if request.url.path == "/":
+            return httpx.Response(404)
+        return httpx.Response(200, text=VIDEO_WATCH_HTML)
+
+    result = await connector_autodiscover.autodiscover_connector_for_url(
+        url, transport=httpx.MockTransport(fetch)
+    )
+    assert result["ok"] is True
+    assert result["level"] == "item"
+    assert (app_dir / "config" / "connectors.local.json").is_file()
+    assert connector_registry.find_connector_for_url(url).display_name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 429])
+async def test_access_restriction_does_not_register_a_connector(tmp_path: Path, monkeypatch, status):
+    config = tmp_path / "connectors.local.json"
+    monkeypatch.setenv("IMAGEX_CONNECTORS_FILE", str(config))
+    monkeypatch.setenv("IMAGEX_TEST_ALLOW_LOCALHOST", "1")
+    calls = []
+
+    def fetch(request):
+        calls.append(request.url.path)
+        return httpx.Response(status)
+
+    result = await connector_autodiscover.autodiscover_connector_for_url(
+        "https://portal.example/video/abc1", transport=httpx.MockTransport(fetch)
+    )
+    assert result["ok"] is False
+    assert calls == ["/"]
+    assert not config.exists()
+
+
+@pytest.mark.asyncio
+async def test_discovery_does_not_follow_redirects_to_another_site(tmp_path: Path, monkeypatch):
+    config = tmp_path / "connectors.local.json"
+    monkeypatch.setenv("IMAGEX_CONNECTORS_FILE", str(config))
+    monkeypatch.setenv("IMAGEX_TEST_ALLOW_LOCALHOST", "1")
+    visited = []
+
+    def fetch(request):
+        visited.append(request.url.host)
+        return httpx.Response(302, headers={"location": "https://other.example/"})
+
+    result = await connector_autodiscover.autodiscover_connector_for_url(
+        "https://portal.example/", transport=httpx.MockTransport(fetch)
+    )
+    assert result["ok"] is False
+    assert visited == ["portal.example"]
+    assert not config.exists()
+
+
+@pytest.mark.asyncio
+async def test_timeline_pasted_link_registers_clean_install_source(tmp_path: Path, monkeypatch):
+    from fastapi import FastAPI
+    from src.server import timeline_omni_service
+
+    monkeypatch.setenv("IMAGEX_CONNECTORS_FILE", str(tmp_path / "connectors.local.json"))
+    monkeypatch.setenv("IMAGEX_INTEGRATED_SOURCES_FILE", str(tmp_path / "sources.json"))
+    monkeypatch.delenv("IMAGEX_BUNDLED_CONNECTORS_FILE", raising=False)
+    monkeypatch.setenv("IMAGEX_TEST_ALLOW_LOCALHOST", "1")
+    monkeypatch.setattr(connector_autodiscover, "check_ytdlp_runtime_support", lambda _: False)
+    connector_registry.clear_connector_cache()
+
+    def fetch(request):
+        if request.url.path == "/":
+            return httpx.Response(404)
+        return httpx.Response(200, text=VIDEO_WATCH_HTML)
+
+    async def discover(url):
+        return await connector_autodiscover.autodiscover_connector_for_url(
+            url, transport=httpx.MockTransport(fetch)
+        )
+
+    monkeypatch.setattr(timeline_omni_service, "autodiscover_connector_for_url", discover)
+    app = FastAPI()
+    app.include_router(timeline_omni_service.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        before = (await client.get("/api/profile-hub/timeline/integrated-sources")).json()["sources"]
+        response = await client.post(
+            "/api/profile-hub/timeline/integrate-url", json={"url": "https://portal.example/video/abc1"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["integration"]["autoDiscovered"] is True
+        assert data["integration"]["level"] == "item"
+        sources = (await client.get("/api/profile-hub/timeline/integrated-sources")).json()["sources"]
+        assert [row["id"] for row in sources] == [row["id"] for row in before] + [data["integration"]["sourceId"]]
+
+
+def test_repeated_thumbnail_links_identify_video_without_duration_labels():
+    html = "".join(
+        f'<article class="media-card"><a href="/video-{idx}/demo"><img src="/thumb.jpg">Demo</a></article>'
+        for idx in range(4)
+    )
+    result = connector_autodiscover.synthesize_descriptor_from_html(
+        normalized_url="https://portal.example/", root_html=html
+    )
+    assert result is not None
+    assert result[0] == "videoPortals"
+    assert result[1]["videoCards"]["cardSelector"] == "article.media-card"
+
+
+def test_video_links_on_another_site_do_not_classify_local_images_as_video():
+    html = "".join(
+        f'<article class="media-card"><a href="https://other.example/video-{idx}/demo">'
+        '<img src="/thumb.jpg">Demo</a></article>'
+        for idx in range(4)
+    )
+    result = connector_autodiscover.synthesize_descriptor_from_html(
+        normalized_url="https://portal.example/", root_html=html
+    )
+    assert result is not None
+    assert result[0] == "catalogs"

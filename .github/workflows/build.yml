@@ -52,12 +52,12 @@ jobs:
           IMAGEX_DEFAULT_CONNECTORS_JSON: ${{ secrets.IMAGEX_DEFAULT_CONNECTORS_JSON }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:IMAGEX_DEFAULT_CONNECTORS_JSON)) {
-            Write-Error "Secret IMAGEX_DEFAULT_CONNECTORS_JSON is not configured."
-            exit 1
+            Write-Host "No distributable default connectors configured; runtime discovery remains available."
+            exit 0
           }
           $null = $env:IMAGEX_DEFAULT_CONNECTORS_JSON | ConvertFrom-Json
           New-Item -ItemType Directory -Force -Path config | Out-Null
-          [System.IO.File]::WriteAllText("config/connectors.local.json", $env:IMAGEX_DEFAULT_CONNECTORS_JSON, (New-Object System.Text.UTF8Encoding $false))
+          [System.IO.File]::WriteAllText("config/connectors.defaults.json", $env:IMAGEX_DEFAULT_CONNECTORS_JSON, (New-Object System.Text.UTF8Encoding $false))
 
       - name: Gerar Executável com PyInstaller
         run: |

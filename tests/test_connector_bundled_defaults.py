@@ -23,7 +23,7 @@ def test_frozen_executable_loads_connectors_shipped_inside_bundle(tmp_path: Path
     bundle_dir = tmp_path / "bundle"
     app_dir = tmp_path / "app"
     app_dir.mkdir()
-    _write(bundle_dir / "config" / "connectors.local.json", {"catalogs": [_catalog("cat_shipped", "Shipped", "portal.example")]})
+    _write(bundle_dir / "config" / "connectors.defaults.json", {"catalogs": [_catalog("cat_shipped", "Shipped", "portal.example")]})
 
     monkeypatch.delenv("IMAGEX_CONNECTORS_FILE", raising=False)
     monkeypatch.delenv("IMAGEX_BUNDLED_CONNECTORS_FILE", raising=False)

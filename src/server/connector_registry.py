@@ -397,7 +397,10 @@ def get_bundled_connectors_path() -> Path | None:
         return Path(env_path)
     bundle_root = getattr(sys, "_MEIPASS", None)
     if getattr(sys, "frozen", False) and bundle_root:
-        return Path(bundle_root) / "config" / "connectors.local.json"
+        # Prefer the explicitly staged defaults, while retaining support for older packaging.
+        folder = Path(bundle_root) / "config"
+        shipped = folder / "connectors.defaults.json"
+        return shipped if shipped.is_file() else folder / "connectors.local.json"
     return None
 
 

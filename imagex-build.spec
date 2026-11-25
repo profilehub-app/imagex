@@ -8,12 +8,11 @@ datas = [
     ('assets', 'assets')
 ]
 
-# Default connectors are untracked; ship them read-only inside the executable so a fresh
-# install works without any user-provided file. Builds must provide this file.
-_DEFAULT_CONNECTORS = os.path.join('config', 'connectors.local.json')
-if not os.path.isfile(_DEFAULT_CONNECTORS):
-    raise SystemExit(f'Missing {_DEFAULT_CONNECTORS}: refusing to build an executable without default connectors.')
-datas.append((_DEFAULT_CONNECTORS, 'config'))
+# Only explicitly staged distributable defaults can go into the executable.
+# The editable workstation configuration must never be picked up by a build.
+_DEFAULT_CONNECTORS = os.path.join('config', 'connectors.defaults.json')
+if os.path.isfile(_DEFAULT_CONNECTORS):
+    datas.append((_DEFAULT_CONNECTORS, 'config'))
 binaries = []
 hiddenimports = ['uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.lifespan.on']
 tmp_ret = collect_all('src')

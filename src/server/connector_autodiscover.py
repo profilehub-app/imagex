@@ -121,7 +121,7 @@ def validate_discovery_url(raw_url: str) -> tuple[str | None, str | None]:
         return None, "invalid_url"
 
     host = (parsed.hostname or "").strip().lower()
-    if not host:
+    if not host or parsed.username is not None or parsed.password is not None:
         return None, "invalid_url"
 
     if not allow_local:
@@ -284,6 +284,28 @@ def _infer_card_selector(tree: LexborHTMLParser) -> tuple[str, int, int]:
     return "article, li, div", total_image_anchors, duration_cards
 
 
+_VIDEO_ITEM_ROUTE_RE = re.compile(
+    r"^/(?:videos?|watch|clips?)(?:[/_-])[^/?#]+", re.IGNORECASE
+)
+
+
+def _count_video_card_links(tree: LexborHTMLParser, origin: str) -> int:
+    """Count unique same-site thumbnail links with a recognizable video-item route."""
+    host = (urlsplit(origin).hostname or "").removeprefix("www.")
+    paths = set()
+    for anchor in tree.css("a[href]"):
+        if anchor.css_first("img") is None:
+            continue
+        try:
+            linked = urlsplit(urljoin(origin + "/", anchor.attributes.get("href") or ""))
+        except ValueError:
+            continue
+        if linked.scheme == "https" and (linked.hostname or "").removeprefix("www.") == host:
+            if _VIDEO_ITEM_ROUTE_RE.match(linked.path):
+                paths.add(linked.path)
+    return len(paths)
+
+
 def _classify_deep_url_level(
     normalized_url: str,
     target_tree: LexborHTMLParser | None,
@@ -371,6 +393,7 @@ def synthesize_descriptor_from_html(
         or "videoobject" in ld_lower
         or has_video_tag
         or duration_cards >= 2
+        or _count_video_card_links(root_tree, origin) >= 3
     )
     is_forum = (
         not is_video_portal
@@ -676,17 +699,31 @@ def delete_local_connector(source_id: str) -> dict[str, Any]:
 
 
 async def _bounded_get_html(client: httpx.AsyncClient, url: str) -> str:
-    async with client.stream("GET", url, follow_redirects=True) as resp:
-        resp.raise_for_status()
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in resp.aiter_bytes():
-            total += len(chunk)
-            if total > _MAX_FETCH_BYTES:
-                chunks.append(chunk[: max(0, _MAX_FETCH_BYTES - (total - len(chunk)))])
-                break
-            chunks.append(chunk)
-        return b"".join(chunks).decode("utf-8", errors="ignore")
+    initial = urlsplit(url)
+    host = (initial.hostname or "").lower().removeprefix("www.")
+    for _ in range(4):
+        async with client.stream("GET", url, follow_redirects=False) as resp:
+            if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
+                candidate = urljoin(url, resp.headers["location"])
+                next_url = urlsplit(candidate)
+                next_host = (next_url.hostname or "").lower().removeprefix("www.")
+                if (next_host, next_url.scheme, next_url.port) != (host, initial.scheme, initial.port):
+                    raise ValueError("blocked_discovery_redirect")
+                normalized, error = validate_discovery_url(candidate)
+                if error or not normalized:
+                    raise ValueError("blocked_discovery_redirect")
+                url = normalized
+                continue
+            resp.raise_for_status()
+            chunks: list[bytes] = []
+            remaining = _MAX_FETCH_BYTES
+            async for chunk in resp.aiter_bytes():
+                chunks.append(chunk[:remaining])
+                remaining -= min(len(chunk), remaining)
+                if not remaining:
+                    break
+            return b"".join(chunks).decode("utf-8", errors="ignore")
+    raise ValueError("too_many_discovery_redirects")
 
 
 async def autodiscover_connector_for_url(
@@ -712,20 +749,35 @@ async def autodiscover_connector_for_url(
     root_html = ""
     target_html: str | None = None
     try:
+        if transport is None and not _allow_insecure_test_origins():
+            from .profile_hub_execution_runtime import PublicHTTPSHttpxTransport
+
+            transport = PublicHTTPSHttpxTransport()
         async with httpx.AsyncClient(
             transport=transport,
             timeout=_FETCH_TIMEOUT_S,
             headers=headers,
         ) as client:
-            root_html = await _bounded_get_html(client, origin_url)
+            try:
+                root_html = await _bounded_get_html(client, origin_url)
+            except httpx.HTTPStatusError as exc:
+                # A site need not expose a home page. A pasted, public deep link
+                # can still provide evidence. Do not retry access-control errors.
+                if not need_target or exc.response.status_code not in (404, 405, 410):
+                    raise
             if need_target:
                 try:
                     target_html = await _bounded_get_html(client, normalized)
                 except Exception:
-                    target_html = None
+                    if not root_html:
+                        raise
+            if not root_html and target_html:
+                root_html = target_html
     except Exception:
         return {"ok": False, "reason": "unreachable_origin", "targetUrl": normalized}
 
+    if not root_html.strip() and not (target_html or "").strip():
+        return {"ok": False, "reason": "unsupported_domain", "targetUrl": normalized}
     ytdlp_ok = check_ytdlp_runtime_support(normalized)
     synthesized = synthesize_descriptor_from_html(
         normalized_url=normalized,
