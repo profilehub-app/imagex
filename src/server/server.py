@@ -18,12 +18,8 @@ try:
     load_dotenv()
 except ImportError:
     pass
-# Safe Playwright configuration for packaged executable (.exe)
-if getattr(sys, 'frozen', False):
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(sys._MEIPASS, "b")
-    bundle_driver = os.path.join(getattr(sys, '_MEIPASS', ''), 'playwright', 'driver')
-    if os.path.exists(bundle_driver):
-        os.environ["PLAYWRIGHT_NODEJS_PATH"] = os.path.join(bundle_driver, 'node.exe')
+from src.browser import provisioning as browser_runtime
+browser_runtime.configure()
 import re
 import time
 import json
@@ -134,8 +130,23 @@ def is_auto_cloud_sync_enabled() -> bool:
     return _check()
 
 app = FastAPI(title="AI Album Intelligence Agent API")
+
+@app.get("/api/browser-runtime")
+async def browser_runtime_status():
+    return browser_runtime.snapshot()
+
+@app.post("/api/browser-runtime/retry")
+async def retry_browser_runtime(request: Request):
+    if not browser_runtime.allows_local_retry(
+        request.client.host if request.client else None, request.headers.get("host"),
+        request.headers.get("origin"), request.headers.get("x-imagex-runtime"),
+    ):
+        raise HTTPException(status_code=403, detail="Retry is available on the local ImageX desktop")
+    return browser_runtime.prepare(retry=True)
+
 @app.on_event("startup")
 async def on_app_startup():
+    browser_runtime.prepare()
     # Load existing albums, jobs and start thumbnail healing at server startup
     _load_albums_from_disk()
     _load_jobs_from_disk(clear_zombies=True)

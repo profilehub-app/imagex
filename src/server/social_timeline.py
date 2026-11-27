@@ -317,6 +317,8 @@ class SocialTimeline:
             return self.context
         if self.driver:
             await self.driver.stop()
+        from src.browser.provisioning import require_browser
+        await require_browser(headless=False)
         self.driver = await async_playwright().start()
         try:
             settings = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share")

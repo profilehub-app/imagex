@@ -77,7 +77,7 @@ echo ==============================================================
 set /p CHOICE="Enter choice [1 or 2] (press ENTER for 1): "
 if "%CHOICE%"=="" set CHOICE=1
 if "%CHOICE%"=="2" (
-    python -m playwright install chromium
+    python scripts\install_dependencies.py
     if errorlevel 1 exit /b 1
     echo.
     echo ==============================================================

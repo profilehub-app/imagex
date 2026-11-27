@@ -66,6 +66,8 @@ class BrowserEngine:
         if self._is_started:
             return
 
+        from src.browser.provisioning import require_browser
+        await require_browser(headless=self.headless)
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless,

@@ -8,6 +8,7 @@ import { useProfileHubStore } from './store/useProfileHubStore';
 import { restoreProfileHubLocation } from './services/profileHubRuntime';
 import { Sidebar } from './components/layout/Sidebar';
 import { TopHeader } from './components/layout/TopHeader';
+import { BrowserSetupNotice } from './components/layout/BrowserSetupNotice';
 import { TopTabBar } from './components/layout/TopTabBar';
 import { MiniTaskDock } from './components/layout/MiniTaskDock';
 import { NotificationDrawer } from './components/layout/NotificationDrawer';
@@ -313,6 +314,8 @@ export const App: React.FC = () => {
             <TopTabBar />
           </div>
         )}
+
+        {currentView !== 'shorts' && <BrowserSetupNotice />}
 
         {/* Active View Container with Unified Safe Viewport Scroll */}
         <main

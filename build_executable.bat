@@ -18,7 +18,11 @@ cd ..
 
 echo.
 echo [2/3] Installing Python and build dependencies...
-python scripts\install_dependencies.py --build
+if "%IMAGEX_OFFLINE_BUILD%"=="1" (
+    python scripts\install_dependencies.py --build --offline
+) else (
+    python scripts\install_dependencies.py --build
+)
 if errorlevel 1 goto :error
 
 echo.

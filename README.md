@@ -143,6 +143,8 @@ python -m src.main "https://example.com/gallery" --headed
 
 ---
 
+The standard Windows build opens immediately and downloads Playwright's bundled-version Chromium Headless Shell in the background on first use. The local library stays available. An internet connection is needed for that first download; the optional offline ZIP includes Chromium and does not need this setup.
+
 ### 🛠️ Installation & Setup from Source
 
 Install Python 3.11 or later and Node.js 20 or later first. Run these commands from the repository root in PowerShell.
@@ -300,6 +302,8 @@ feeds pré-cadastrados:
 - Você também pode importar um lote JSON local da Timeline e escolher o que exibir.
 
 ---
+
+O pacote padrão abre imediatamente e baixa em segundo plano a versão compatível do Chromium Headless Shell no primeiro uso. A biblioteca local continua disponível. A primeira instalação precisa de internet; o ZIP offline opcional já inclui o navegador.
 
 ### ⚙️ Como Compilar o Executável (.exe) 🔨
 
