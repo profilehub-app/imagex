@@ -49,4 +49,3 @@ def test_install_only_the_matching_shell_and_keep_private_cache(tmp_path, monkey
     provisioning._install(True)
     fake.assert_called_once()
     assert wrong.is_file()
-
