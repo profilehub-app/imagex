@@ -18,9 +18,7 @@ cd ..
 
 echo.
 echo [2/3] Installing Python and build dependencies...
-python -m pip install -r requirements-build.txt
-if errorlevel 1 goto :error
-python -m playwright install chromium
+python scripts\install_dependencies.py --build
 if errorlevel 1 goto :error
 
 echo.

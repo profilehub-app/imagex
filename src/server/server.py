@@ -20,7 +20,7 @@ except ImportError:
     pass
 # Safe Playwright configuration for packaged executable (.exe)
 if getattr(sys, 'frozen', False):
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     bundle_driver = os.path.join(getattr(sys, '_MEIPASS', ''), 'playwright', 'driver')
     if os.path.exists(bundle_driver):
         os.environ["PLAYWRIGHT_NODEJS_PATH"] = os.path.join(bundle_driver, 'node.exe')

@@ -102,7 +102,29 @@ def main():
     parser.add_argument("--model", type=str, default="qwen2.5:32b", help="Model name (default: qwen2.5:32b)")
     parser.add_argument("--llm-base", type=str, default="http://localhost:11434/v1", help="Local LLM API base URL")
 
+    parser.add_argument("--check-chromium", metavar="RESULT_FILE", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.check_chromium:
+        from pathlib import Path
+        import json
+        from playwright.async_api import async_playwright
+
+        async def check_chromium():
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    await page.goto("data:text/html,<title>ImageX Chromium check</title>")
+                    return {"ok": await page.title() == "ImageX Chromium check", "version": browser.version}
+                finally:
+                    await browser.close()
+
+        try:
+            result = asyncio.run(check_chromium())
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)}
+        Path(args.check_chromium).write_text(json.dumps(result), encoding="utf-8")
+        raise SystemExit(0 if result["ok"] else 1)
 
     if args.server or not args.url:
         local_ips = _get_local_ips()

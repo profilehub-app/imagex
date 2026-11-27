@@ -20,8 +20,7 @@ export PYTHONIOENCODING=utf-8
 # 1. Dependencias Python
 if ! python3 -c "import playwright, fastapi, uvicorn, PIL" 2>/dev/null; then
     echo "[INFO] Instalando dependencias essenciais do requirements.txt..."
-    pip3 install -r requirements.txt || true
-    python3 -m playwright install chromium || true
+    python3 scripts/install_dependencies.py
 fi
 
 # 2. Compilar frontend se dist nao existir

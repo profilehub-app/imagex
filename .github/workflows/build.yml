@@ -43,8 +43,7 @@ jobs:
       - name: Instalar Dependências Python
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-build.txt
-          python -m playwright install chromium
+          python scripts/install_dependencies.py --build
 
       - name: Preparar Conectores Padrão
         shell: pwsh
@@ -62,6 +61,27 @@ jobs:
       - name: Gerar Executável com PyInstaller
         run: |
           python -m PyInstaller imagex-build.spec --noconfirm
+
+      - name: Testar Chromium integrado sem cache local
+        shell: pwsh
+        run: |
+          $test = Join-Path $env:RUNNER_TEMP "imagex-first-run"
+          New-Item -ItemType Directory -Force -Path $test | Out-Null
+          Copy-Item -LiteralPath "dist/IMAGEX.exe" -Destination $test
+          $env:LOCALAPPDATA = Join-Path $test "localappdata"
+          $env:APPDATA = Join-Path $test "appdata"
+          New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA,$env:APPDATA | Out-Null
+          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $test "empty-browser-cache"
+          $proc = Start-Process -FilePath (Join-Path $test "IMAGEX.exe") -ArgumentList '--check-chromium','result.json' -WorkingDirectory $test -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(180000)) {
+            $proc.Kill($true)
+            throw "Timed out validating the bundled Chromium."
+          }
+          $result = Get-Content -Raw (Join-Path $test "result.json") | ConvertFrom-Json
+          if ($proc.ExitCode -ne 0 -or $result.ok -ne $true) {
+            throw "Bundled Chromium failed to start: $($result.error)"
+          }
+          Write-Host "Bundled Chromium started successfully: $($result.version)"
 
       - name: Compactar para ZIP
         run: |

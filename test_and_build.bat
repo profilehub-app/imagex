@@ -60,15 +60,9 @@ if exist "frontend-mobile-preview" (
 echo.
 
 echo [4/5] Installing Python and build dependencies...
-python -m pip install -r requirements-build.txt
+python scripts\install_dependencies.py --build
 if errorlevel 1 (
-    echo [ERROR] Python dependency installation failed!
-    pause
-    exit /b 1
-)
-python -m playwright install chromium
-if errorlevel 1 (
-    echo [ERROR] Chromium installation failed!
+    echo [ERROR] Python or Chromium dependency installation failed!
     pause
     exit /b 1
 )
@@ -83,6 +77,8 @@ echo ==============================================================
 set /p CHOICE="Enter choice [1 or 2] (press ENTER for 1): "
 if "%CHOICE%"=="" set CHOICE=1
 if "%CHOICE%"=="2" (
+    python -m playwright install chromium
+    if errorlevel 1 exit /b 1
     echo.
     echo ==============================================================
     echo  Verification complete! The application is tested and ready.

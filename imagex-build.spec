@@ -1,7 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, get_package_paths
 
 import os
+from pathlib import Path
 
 datas = [
     ('frontend-mobile-preview/dist', 'frontend-mobile-preview/dist'),
@@ -21,6 +22,24 @@ tmp_ret = collect_all('webview')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('playwright')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+# Playwright's hermetic installer downloads both modes into its driver package.
+# Keep Chromium files at exactly that layout inside the one-file executable.
+_driver = Path(get_package_paths('playwright')[1]) / 'driver' / 'package'
+_browser_dir = _driver / '.local-browsers'
+for _pattern in (
+    'chromium-*/chrome-win*/chrome.exe',
+    'chromium_headless_shell-*/chrome-headless-shell-win*/chrome-headless-shell.exe',
+):
+    if not any(_browser_dir.glob(_pattern)):
+        raise SystemExit('Chromium bundle incomplete. Run python scripts/install_dependencies.py --build first.')
+_bundle_prefix = 'playwright/driver/package/.local-browsers'
+datas = [(src, dst) for src, dst in datas if '.local-browsers' not in Path(src).parts]
+# Do not pass browser binaries through PyInstaller/UPX processing.
+binaries = [(src, dst) for src, dst in binaries if '.local-browsers' not in Path(src).parts]
+for _component in _browser_dir.iterdir():
+    if _component.is_dir() and _component.name.startswith(('chromium-', 'chromium_headless_shell-', 'ffmpeg-', 'winldd-')):
+        datas.append((str(_component), f'{_bundle_prefix}/{_component.name}'))
 tmp_ret = collect_all('selectolax')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

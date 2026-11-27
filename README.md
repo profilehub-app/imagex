@@ -152,13 +152,10 @@ Install Python 3.11 or later and Node.js 20 or later first. Run these commands f
 python -m venv venv
 .\venv\Scripts\activate
 
-# 2. Install Python dependencies
-python -m pip install -r requirements.txt
+# 2. Install Python dependencies and the matching Playwright Chromium
+python scripts/install_dependencies.py
 
-# 3. Install Playwright Chromium browser
-python -m playwright install chromium
-
-# 4. Build the frontend
+# 3. Build the frontend
 Push-Location frontend-mobile-preview
 npm ci
 npm run build
@@ -272,13 +269,10 @@ Instale o Python 3.11 ou posterior e o Node.js 20 ou posterior. Execute os coman
 python -m venv venv
 .\venv\Scripts\activate
 
-# 2. Instalar dependências Python
-python -m pip install -r requirements.txt
+# 2. Instalar as dependências Python e o Chromium compatível do Playwright
+python scripts/install_dependencies.py
 
-# 3. Instalar o navegador Chromium do Playwright
-python -m playwright install chromium
-
-# 4. Compilar a interface
+# 3. Compilar a interface
 Push-Location frontend-mobile-preview
 npm ci
 npm run build
