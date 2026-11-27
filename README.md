@@ -1,4 +1,4 @@
-# ⚡ IMAGEX v5.8.2
+# ⚡ IMAGEX v5.8.3
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀🔍
 
@@ -6,7 +6,14 @@ Autonomous platform for intelligent extraction, organization, and inspection of 
 
 ---
 
-## ✨ What's new in v5.8.2
+## What's new in v5.8.3
+
+- The standard Windows executable is smaller and installs Chromium Headless Shell in the background on first launch. The local library remains available while it downloads.
+- Choose the offline Windows ZIP if the computer cannot download Chromium, or use the documented dependency installer when running from source.
+
+[Read the v5.8.3 release notes](docs/release-notes-v5.8.3.md).
+
+### Previous release: v5.8.2
 
 - Catalog galleries open directly into the dedicated gallery view from cards and titles, with background hydration for full-resolution photos, counts, creator attribution, and structured tags across entity and timeline views.
 - Configurable native adapter descriptors are supported in local and bundled connector files while keeping workstation configuration separate.
