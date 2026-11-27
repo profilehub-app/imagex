@@ -33,7 +33,8 @@ for _pattern in (
 ):
     if not any(_browser_dir.glob(_pattern)):
         raise SystemExit('Chromium bundle incomplete. Run python scripts/install_dependencies.py --build first.')
-_bundle_prefix = 'playwright/driver/package/.local-browsers'
+# Keep this path short: the one-file archive may unpack under a deep Windows TEMP.
+_bundle_prefix = 'b'
 datas = [(src, dst) for src, dst in datas if '.local-browsers' not in Path(src).parts]
 # Do not pass browser binaries through PyInstaller/UPX processing.
 binaries = [(src, dst) for src, dst in binaries if '.local-browsers' not in Path(src).parts]
@@ -57,6 +58,11 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Playwright's hook can add the default hermetic layout a second time.
+# Keep only the explicit short-path copy of the browser payload.
+_auto_browser_prefix = 'playwright/driver/package/.local-browsers/'
+a.datas = [entry for entry in a.datas if not entry[0].replace(chr(92), '/').startswith(_auto_browser_prefix)]
+a.binaries = [entry for entry in a.binaries if not entry[0].replace(chr(92), '/').startswith(_auto_browser_prefix)]
 pyz = PYZ(a.pure)
 
 exe = EXE(
